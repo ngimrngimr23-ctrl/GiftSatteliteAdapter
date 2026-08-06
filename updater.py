@@ -16,6 +16,7 @@ SUBSCRIPTION_BODY_FIELDS = [
     "collectionName",
     "modelNames",
     "backdropNames",
+    "symbolNames",
     "numberPattern",
     "portalsNotifyMaxPrice",
     "notifyTg",
@@ -35,7 +36,7 @@ SUBSCRIPTION_BODY_FIELDS = [
 ]
 
 # Поля-массивы: сервер требует, чтобы они присутствовали в теле, но не как null.
-ARRAY_FIELDS = {"modelNames", "backdropNames"}
+ARRAY_FIELDS = {"modelNames", "backdropNames", "symbolNames"}
 
 
 def _build_update_body(sub: dict, new_price: float) -> dict:
@@ -139,3 +140,4 @@ def run_cycle(account):
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
+        
