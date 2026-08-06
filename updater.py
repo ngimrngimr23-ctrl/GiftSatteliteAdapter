@@ -114,9 +114,11 @@ def run_cycle(account):
 
         body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
         body["portalsAutobuyMaxPrice"] = new_price
-        # сервер требует numberPattern строкой, а не null
-        if body.get("numberPattern") is None:
-            body["numberPattern"] = ""
+        # numberPattern: сервер валидирует regex ^[A-Za-z0-9]+$ — пустая
+        # строка/null его не проходят, поэтому при отсутствии паттерна
+        # поле нужно не отправлять вовсе, а не слать "" или null.
+        if not body.get("numberPattern"):
+            body.pop("numberPattern", None)
 
         try:
             client.update_subscription(sub["_id"], body)
