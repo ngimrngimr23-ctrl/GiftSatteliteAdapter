@@ -16,7 +16,6 @@ SUBSCRIPTION_BODY_FIELDS = [
     "collectionName",
     "modelNames",
     "backdropNames",
-    "symbolNames",
     "numberPattern",
     "portalsNotifyMaxPrice",
     "notifyTg",
@@ -35,29 +34,6 @@ SUBSCRIPTION_BODY_FIELDS = [
     "forwardToTopic",
 ]
 
-# Поля-массивы: сервер требует, чтобы они присутствовали в теле, но не как null.
-ARRAY_FIELDS = {"modelNames", "backdropNames", "symbolNames"}
-
-
-def _build_update_body(sub: dict, new_price: float) -> dict:
-    """
-    Собирает тело PUT-запроса из данных подписки.
-    - Массивы всегда включаются в тело (null -> []).
-    - Остальные необязательные поля со значением None не включаются вообще,
-      т.к. валидатор Fastify на бэкенде, похоже, не разрешает null для них.
-    """
-    body = {}
-    for field in SUBSCRIPTION_BODY_FIELDS:
-        value = sub.get(field)
-        if field in ARRAY_FIELDS:
-            body[field] = value if value is not None else []
-        elif value is not None:
-            body[field] = value
-        # если value is None и поле не массив — просто не добавляем его в body
-
-    body["portalsAutobuyMaxPrice"] = new_price
-    return body
-
 
 def _eligible(sub: dict) -> bool:
     """Обновляем только подписки с включённым автобаем и уже заданной ценой."""
@@ -71,9 +47,16 @@ def _eligible(sub: dict) -> bool:
 
 
 def _current_floor(client, sub: dict, account) -> float | None:
+    """
+    Минимальная цена по коллекции в целом.
+
+    ВАЖНО: modelNames подписки здесь намеренно игнорируется — floor считается
+    по всей коллекции без фильтра по моделям, чтобы автобай ставил цену на
+    самый дешёвый подарок в коллекции, а не на дешёвый подарок среди
+    конкретных моделей из подписки.
+    """
     collection = sub["collectionName"]
     sub_name = sub.get("subscriptionName", sub["_id"])
-    models = sub.get("modelNames") or None
     backdrops = sub.get("backdropNames") or None
     number = sub.get("numberPattern")
     if number and len(number) > NUMBER_MAX_LEN_SEARCH:
@@ -83,7 +66,7 @@ def _current_floor(client, sub: dict, account) -> float | None:
     for market in MARKETS:
         try:
             listings = client.search_market(
-                market, collection, models=models, backdrops=backdrops, number=number
+                market, collection, models=None, backdrops=backdrops, number=number
             )
         except ApiError as e:
             account.record_error(f"[{sub_name}] search {market}/{collection}: {e}")
@@ -128,7 +111,8 @@ def run_cycle(account):
             skipped += 1
             continue
 
-        body = _build_update_body(sub, new_price)
+        body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
+        body["portalsAutobuyMaxPrice"] = new_price
 
         try:
             client.update_subscription(sub["_id"], body)
@@ -140,4 +124,4 @@ def run_cycle(account):
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
-        
+    
