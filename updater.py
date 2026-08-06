@@ -49,7 +49,10 @@ def _eligible(sub: dict) -> bool:
 
 def _current_floor(client, sub: dict, account) -> float | None:
     """
-    Минимальная цена по коллекции в целом.
+    Цена по коллекции в целом, взятая как максимум floor-цен среди трёх
+    маркетов (MARKETS): для каждого маркета берём его собственный floor
+    (минимальную цену листинга на этом маркете), а затем среди этих
+    floor-цен выбираем наибольшую.
 
     ВАЖНО: modelNames подписки здесь намеренно игнорируется — floor считается
     по всей коллекции без фильтра по моделям, чтобы автобай ставил цену на
@@ -73,8 +76,8 @@ def _current_floor(client, sub: dict, account) -> float | None:
             account.record_error(f"[{sub_name}] search {market}/{collection}: {e}")
             continue
         if listings:
-            price = listings[0]["normalizedPrice"]
-            if best is None or price < best:
+            price = listings[0]["normalizedPrice"]  # самый дешёвый листинг на этом маркете
+            if best is None or price > best:
                 best = price
     return best
 
