@@ -16,6 +16,7 @@ SUBSCRIPTION_BODY_FIELDS = [
     "collectionName",
     "modelNames",
     "backdropNames",
+    "symbolNames",
     "numberPattern",
     "portalsNotifyMaxPrice",
     "notifyTg",
@@ -124,4 +125,3 @@ def run_cycle(account):
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
-    
