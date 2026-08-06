@@ -114,6 +114,9 @@ def run_cycle(account):
 
         body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
         body["portalsAutobuyMaxPrice"] = new_price
+        # сервер требует numberPattern строкой, а не null
+        if body.get("numberPattern") is None:
+            body["numberPattern"] = ""
 
         try:
             client.update_subscription(sub["_id"], body)
@@ -125,3 +128,4 @@ def run_cycle(account):
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
+    
