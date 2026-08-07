@@ -49,10 +49,10 @@ def _eligible(sub: dict) -> bool:
 
 def _current_floor(client, sub: dict, account) -> float | None:
     """
-    Цена по коллекции в целом, взятая как максимум floor-цен среди трёх
-    маркетов (MARKETS): для каждого маркета берём его собственный floor
-    (минимальную цену листинга на этом маркете), а затем среди этих
-    floor-цен выбираем наибольшую.
+    Цена по коллекции в целом, взятая как среднее между минимальной и
+    максимальной floor-ценой среди трёх маркетов (MARKETS): для каждого
+    маркета берём его собственный floor (минимальную цену листинга на
+    этом маркете), а затем берём (min(floor'ов) + max(floor'ов)) / 2.
 
     ВАЖНО: modelNames подписки здесь намеренно игнорируется — floor считается
     по всей коллекции без фильтра по моделям, чтобы автобай ставил цену на
@@ -66,7 +66,7 @@ def _current_floor(client, sub: dict, account) -> float | None:
     if number and len(number) > NUMBER_MAX_LEN_SEARCH:
         number = None
 
-    best = None
+    market_floors = []
     for market in MARKETS:
         try:
             listings = client.search_market(
@@ -76,10 +76,45 @@ def _current_floor(client, sub: dict, account) -> float | None:
             account.record_error(f"[{sub_name}] search {market}/{collection}: {e}")
             continue
         if listings:
-            price = listings[0]["normalizedPrice"]  # самый дешёвый листинг на этом маркете
-            if best is None or price > best:
-                best = price
-    return best
+            market_floors.append(listings[0]["normalizedPrice"])  # самый дешёвый листинг на этом маркете
+
+    if not market_floors:
+        return None
+    return (min(market_floors) + max(market_floors)) / 2
+
+
+def check_purchases(account) -> list[dict]:
+    """
+    Проверяет GET /user/purchases и возвращает новые (ещё не виденные) покупки
+    в хронологическом порядке (сначала старые). Обновляет account.last_purchase_ts,
+    но не сохраняет состояние — save_persisted должен вызвать вызывающий код.
+
+    На самом первом запуске (last_purchase_ts ещё не задан) ничего не возвращает —
+    просто запоминает текущую последнюю покупку, чтобы не спамить всей историей.
+    """
+    try:
+        data = account.client.get_purchases(page=0)
+    except ApiError as e:
+        account.record_error(f"get_purchases: {e}")
+        return []
+
+    purchases = (data or {}).get("purchases", [])
+    if not purchases:
+        return []
+
+    # сортируем сами — сортировка ответа сервером явно не гарантирована в доках
+    purchases = sorted(purchases, key=lambda p: p.get("timestamp", ""), reverse=True)
+
+    if account.last_purchase_ts is None:
+        account.last_purchase_ts = purchases[0].get("timestamp")
+        return []
+
+    new_ones = [p for p in purchases if p.get("timestamp", "") > account.last_purchase_ts]
+    if not new_ones:
+        return []
+
+    account.last_purchase_ts = purchases[0].get("timestamp")
+    return list(reversed(new_ones))  # старые сначала
 
 
 def run_cycle(account):
