@@ -1,5 +1,6 @@
 import time
 import logging
+import statistics
 
 from api_client import ApiError
 
@@ -7,7 +8,6 @@ log = logging.getLogger("updater")
 
 MARKETS = ["portals", "tonnel", "mrkt"]  # где смотрим актуальную цену
 MIN_DELTA = 0.02  # не дёргать PUT, если цена изменилась меньше чем на столько TON
-NUMBER_MAX_LEN_SEARCH = 6  # /search ограничивает numberPattern 6 символами
 
 # Поля, которые нужно переслать обратно в PUT /user/update-subscription/:id
 # (тело идентично POST /user/subscribe)
@@ -49,28 +49,27 @@ def _eligible(sub: dict) -> bool:
 
 def _current_floor(client, sub: dict, account) -> float | None:
     """
-    Цена по коллекции в целом, взятая как среднее между минимальной и
-    максимальной floor-ценой среди трёх маркетов (MARKETS): для каждого
-    маркета берём его собственный floor (минимальную цену листинга на
-    этом маркете), а затем берём (min(floor'ов) + max(floor'ов)) / 2.
+    Цена по коллекции в целом, взятая как медиана floor-цен среди трёх
+    маркетов (MARKETS): для каждого маркета берём его собственный floor
+    (минимальную цену листинга на этом маркете), а затем берём медиану
+    среди этих floor-цен. Медиана устойчивее к разовым ценовым выбросам
+    на одном из маркетов, чем среднее.
 
-    ВАЖНО: modelNames подписки здесь намеренно игнорируется — floor считается
-    по всей коллекции без фильтра по моделям, чтобы автобай ставил цену на
-    самый дешёвый подарок в коллекции, а не на дешёвый подарок среди
-    конкретных моделей из подписки.
+    ВАЖНО: modelNames и numberPattern подписки здесь намеренно
+    игнорируются — floor считается по всей коллекции без каких-либо
+    фильтров подписки, чтобы автобай ставил цену на самый дешёвый
+    подарок в коллекции целиком, а не на дешёвый подарок среди узкой
+    подвыборки (конкретных моделей или конкретной длины номера).
     """
     collection = sub["collectionName"]
     sub_name = sub.get("subscriptionName", sub["_id"])
     backdrops = sub.get("backdropNames") or None
-    number = sub.get("numberPattern")
-    if number and len(number) > NUMBER_MAX_LEN_SEARCH:
-        number = None
 
     market_floors = []
     for market in MARKETS:
         try:
             listings = client.search_market(
-                market, collection, models=None, backdrops=backdrops, number=number
+                market, collection, models=None, backdrops=backdrops, number=None
             )
         except ApiError as e:
             account.record_error(f"[{sub_name}] search {market}/{collection}: {e}")
@@ -80,7 +79,7 @@ def _current_floor(client, sub: dict, account) -> float | None:
 
     if not market_floors:
         return None
-    return (min(market_floors) + max(market_floors)) / 2
+    return statistics.median(market_floors)
 
 
 def check_purchases(account) -> list[dict]:
