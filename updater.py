@@ -119,6 +119,7 @@ def check_purchases(account) -> list[dict]:
 def run_cycle(account):
     """account: state.AccountState. Синхронная функция — вызывать через asyncio.to_thread из бота."""
     account.last_run_ts = time.time()
+    account.errors.clear()  # буфер /errors отражает только текущий цикл, а не всю историю
     updated = 0
     skipped = 0
     client = account.client
@@ -167,4 +168,4 @@ def run_cycle(account):
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
-    
+
