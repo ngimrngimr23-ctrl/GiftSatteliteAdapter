@@ -25,7 +25,8 @@ _UPSTASH_ENABLED = bool(UPSTASH_URL and UPSTASH_TOKEN)
 class AccountState:
     name: str
     client: object  # GiftApiClient
-    markup_pct: float = 3.0
+    markup_pct: float = 3.0  # наценка для заказов на модели (подписки без backdropNames)
+    markup_pct_fon: float = 3.0  # наценка для заказов на фоны (подписки с заданным backdropNames)
     paused: bool = False
     last_run_ts: Optional[float] = None
     last_updated_count: int = 0
@@ -37,7 +38,7 @@ class AccountState:
         log.error("[%s] %s", self.name, message)
 
     def to_persist(self):
-        return {"markup_pct": self.markup_pct, "paused": self.paused}
+        return {"markup_pct": self.markup_pct, "markup_pct_fon": self.markup_pct_fon, "paused": self.paused}
 
 
 def _upstash_headers():

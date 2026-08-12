@@ -43,6 +43,7 @@ def build_accounts() -> dict:
         acc = AccountState(name=name, client=client)
         saved = persisted.get(name, {})
         acc.markup_pct = saved.get("markup_pct", acc.markup_pct)
+        acc.markup_pct_fon = saved.get("markup_pct_fon", acc.markup_pct_fon)
         acc.paused = saved.get("paused", acc.paused)
         accounts[name] = acc
     return accounts
@@ -82,14 +83,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status — сводка по аккаунтам\n"
         "/errors — сводка ошибок\n"
         "/subs — активные автобай-подписки\n"
-        "/setmarkup <%> — сменить наценку над floor\n"
+        "/setmarkup <%> — наценка над floor для заказов на модели\n"
+        "/setmarkupfon <%> — наценка над floor для заказов на фоны (подписки с заданным backdropNames)\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
         "\n"
-        "Для /status, /errors, /subs, /setmarkup, /forceupdate: добавь <acc> вторым (для /setmarkup — после наценки) "
-        "аргументом, чтобы применить команду к одному конкретному аккаунту, напр. /setmarkup acc1 5 или /status acc1. "
-        "Без <acc> они работают сразу по всем аккаунтам."
+        "Для /status, /errors, /subs, /setmarkup, /setmarkupfon, /forceupdate: добавь <acc> вторым (для /setmarkup"
+        "/setmarkupfon — после наценки) аргументом, чтобы применить команду к одному конкретному аккаунту, "
+        "напр. /setmarkup acc1 5 или /status acc1. Без <acc> они работают сразу по всем аккаунтам."
     )
 
 
@@ -106,7 +108,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [
             f"📋 {acc.name}",
             f"Статус: {'⏸ на паузе' if acc.paused else '▶️ активен'}",
-            f"Наценка: +{acc.markup_pct}%",
+            f"Наценка (модели): +{acc.markup_pct}%",
+            f"Наценка (фоны): +{acc.markup_pct_fon}%",
             f"Последний запуск: {fmt_ago(acc.last_run_ts)}",
             f"Обновлено цен: {acc.last_updated_count}, пропущено: {acc.last_skipped_count}",
             f"Ошибок в буфере: {len(acc.errors)}",
@@ -219,10 +222,10 @@ async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text[i:i + 4000])
 
 
-async def cmd_setmarkup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _cmd_setmarkup_generic(update: Update, context: ContextTypes.DEFAULT_TYPE, attr_name: str, cmd_name: str, label: str):
     """
-    /setmarkup <%>        — установить наценку сразу для ВСЕХ аккаунтов
-    /setmarkup <acc> <%>  — установить наценку для одного конкретного аккаунта
+    <cmd_name> <%>        — установить наценку (attr_name) сразу для ВСЕХ аккаунтов
+    <cmd_name> <acc> <%>  — установить наценку для одного конкретного аккаунта
     """
     if not authorized(update):
         return
@@ -234,8 +237,8 @@ async def cmd_setmarkup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Использование:\n"
-            "/setmarkup <%> — для всех аккаунтов, напр. /setmarkup 5\n"
-            "/setmarkup <acc> <%> — для одного аккаунта, напр. /setmarkup acc1 5"
+            f"{cmd_name} <%> — {label}, для всех аккаунтов, напр. {cmd_name} 5\n"
+            f"{cmd_name} <acc> <%> — {label}, для одного аккаунта, напр. {cmd_name} acc1 5"
         )
         return
 
@@ -247,9 +250,9 @@ async def cmd_setmarkup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Наценка должна быть числом, напр. 3 или 4.5")
             return
         for acc in accounts.values():
-            acc.markup_pct = pct
+            setattr(acc, attr_name, pct)
         save_persisted(accounts)
-        await update.message.reply_text(f"Наценка +{pct}% установлена для всех аккаунтов ({len(accounts)})")
+        await update.message.reply_text(f"Наценка ({label}) +{pct}% установлена для всех аккаунтов ({len(accounts)})")
         return
 
     # два и более аргумента = <acc> <%>, применяется к одному аккаунту
@@ -262,9 +265,19 @@ async def cmd_setmarkup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Наценка должна быть числом, напр. 3 или 4.5")
         return
-    acc.markup_pct = pct
+    setattr(acc, attr_name, pct)
     save_persisted(accounts)
-    await update.message.reply_text(f"[{acc.name}] наценка установлена: +{pct}%")
+    await update.message.reply_text(f"[{acc.name}] наценка ({label}) установлена: +{pct}%")
+
+
+async def cmd_setmarkup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setmarkup — наценка над floor для заказов на модели (подписки без backdropNames)."""
+    await _cmd_setmarkup_generic(update, context, "markup_pct", "/setmarkup", "модели")
+
+
+async def cmd_setmarkupfon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setmarkupfon — наценка над floor для заказов на фоны (подписки с заданным backdropNames)."""
+    await _cmd_setmarkup_generic(update, context, "markup_pct_fon", "/setmarkupfon", "фоны")
 
 
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -441,6 +454,7 @@ def main():
     app.add_handler(CommandHandler("errors", cmd_errors))
     app.add_handler(CommandHandler("subs", cmd_subs))
     app.add_handler(CommandHandler("setmarkup", cmd_setmarkup))
+    app.add_handler(CommandHandler("setmarkupfon", cmd_setmarkupfon))
     app.add_handler(CommandHandler("forceupdate", cmd_forceupdate))
     app.add_handler(CommandHandler("setinterval", cmd_setinterval))
     app.add_handler(CommandHandler("pause", cmd_pause))
