@@ -36,6 +36,11 @@ SUBSCRIPTION_BODY_FIELDS = [
 ]
 
 
+def _is_fon_order(sub: dict) -> bool:
+    """Заказ на фон — это подписка с непустым backdropNames (списком конкретных фонов)."""
+    return bool(sub.get("backdropNames"))
+
+
 def _eligible(sub: dict) -> bool:
     """Обновляем только подписки с включённым автобаем и уже заданной ценой."""
     if not sub.get("portalsAutobuy"):
@@ -123,7 +128,8 @@ def run_cycle(account):
     updated = 0
     skipped = 0
     client = account.client
-    markup_mult = 1 + account.markup_pct / 100
+    markup_mult_model = 1 + account.markup_pct / 100
+    markup_mult_fon = 1 + account.markup_pct_fon / 100
 
     try:
         subs = client.get_subscriptions()
@@ -144,6 +150,10 @@ def run_cycle(account):
             skipped += 1
             continue
 
+        is_fon = _is_fon_order(sub)
+        markup_mult = markup_mult_fon if is_fon else markup_mult_model
+        markup_pct = account.markup_pct_fon if is_fon else account.markup_pct
+
         new_price = round(floor * markup_mult, 2)
         old_price = sub.get("portalsAutobuyMaxPrice")
         if old_price is not None and abs(new_price - old_price) < MIN_DELTA:
@@ -161,8 +171,8 @@ def run_cycle(account):
         try:
             client.update_subscription(sub["_id"], body)
             updated += 1
-            log.info("[%s/%s] обновлено: %s -> %s TON (floor %.2f, +%.1f%%)",
-                      account.name, name, old_price, new_price, floor, account.markup_pct)
+            log.info("[%s/%s] обновлено (%s): %s -> %s TON (floor %.2f, +%.1f%%)",
+                      account.name, name, "фон" if is_fon else "модель", old_price, new_price, floor, markup_pct)
         except ApiError as e:
             account.record_error(f"[{name}] update_subscription: {e}")
 
