@@ -243,12 +243,13 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     all_floors.update(probed)
 
     candidates = pick_candidates(all_floors, floor, account.premium_pct)
+    threshold = floor * (1 + account.premium_pct / 100)
 
     picked, pumped, no_data = [], [], []
     details = {}
     for model in candidates:
         sales = _fetch_sales(client, collection, model, account.sales_depth, account, now)
-        result = check_pump(sales, all_floors[model], account.tol_pct,
+        result = check_pump(sales, all_floors[model], threshold, account.tol_pct,
                             account.min_sales, account.fresh_hours, now)
         details[model] = {"floor": all_floors[model], **result}
         if result["verdict"] == "ok":
@@ -264,7 +265,7 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
         "no_data": no_data,
         "seen": len(all_floors),
         "candidates": len(candidates),
-        "threshold": floor * (1 + account.premium_pct / 100),
+        "threshold": threshold,
         "details": details,
     }
 

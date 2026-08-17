@@ -46,15 +46,23 @@ def pick_candidates(model_floors: dict, collection_floor: float, premium_pct: fl
     return [model for _, model in above]
 
 
-def check_pump(sales: list, current_floor: float, tol_pct: float,
+def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: float,
                min_sales: int, fresh_hours: float, now: float) -> dict:
     """
     Настоящая ли премия модели. Возвращает
-    {"verdict": "ok"|"pump"|"no_data", "median", "used", "fresh_skipped"}.
+    {"verdict": "ok"|"pump"|"no_data", "median", "inflated", "used", "fresh_skipped"}.
 
     Из базы исключаются самые свежие продажи (моложе fresh_hours): если памп уже
     успел набить сделок, они бы подтянули медиану к пампнутой цене и спрятали
     его. Даты берём из soldAt, дополнительных запросов это не стоит.
+
+    Ключевой момент: задранная текущая цена сама по себе НЕ повод выбросить
+    модель. Платим мы цену ордера, а не цену чужого листинга, поэтому важно
+    одно — сколько модель стоит на самом деле. Если медиана продаж всё равно
+    выше порога, модель законная, даже когда прямо сейчас её выставили втрое
+    дороже обычного. Отсеиваем только тот случай, ради которого проверка и
+    затевалась: без пампа модель порог не проходит, то есть в список она
+    попала бы исключительно из-за задранной цены.
     """
     prices = []
     fresh_skipped = 0
@@ -69,12 +77,16 @@ def check_pump(sales: list, current_floor: float, tol_pct: float,
         prices.append(price)
 
     if len(prices) < min_sales:
-        return {"verdict": "no_data", "median": None, "used": len(prices), "fresh_skipped": fresh_skipped}
+        return {"verdict": "no_data", "median": None, "inflated": False,
+                "used": len(prices), "fresh_skipped": fresh_skipped}
 
     median = statistics.median(prices)
     # односторонне: current < median — это просадка, а не памп
-    verdict = "pump" if median > 0 and current_floor > median * (1 + tol_pct / 100) else "ok"
-    return {"verdict": verdict, "median": median, "used": len(prices), "fresh_skipped": fresh_skipped}
+    inflated = median > 0 and current_floor > median * (1 + tol_pct / 100)
+    # модель выбрасываем, только если без пампа она порога не проходит
+    verdict = "pump" if inflated and median < threshold else "ok"
+    return {"verdict": verdict, "median": median, "inflated": inflated,
+            "used": len(prices), "fresh_skipped": fresh_skipped}
 
 
 def trim_to_limit(models: list) -> list:
