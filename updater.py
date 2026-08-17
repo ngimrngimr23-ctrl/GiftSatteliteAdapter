@@ -165,10 +165,11 @@ def _probe_model_floors(client, collection: str, known: dict, account) -> dict:
         if isinstance(name, str) and name.strip() and name.strip() not in known:
             names.append(name.strip())
 
-    if len(names) > account.probe_limit:
+    if account.probe_limit and len(names) > account.probe_limit:
         log.info("[%s] моделей для добора %d, беру %d (probe_limit)",
                  collection, len(names), account.probe_limit)
         names = names[:account.probe_limit]
+    log.info("[%s] доуточняю цены %d моделей по %d маркет(ам)", collection, len(names), len(MARKETS[:max(1, account.probe_markets)]))
 
     markets = MARKETS[:max(1, account.probe_markets)]
     floors = {}
@@ -220,13 +221,20 @@ def _fetch_sales(client, collection: str, model: str, depth: int, account, now: 
     return sales
 
 
-def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float) -> dict:
+def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float,
+                   probe_cache: dict) -> dict:
     """
     Полный отбор моделей для одной подписки: порог по премии, затем проверка
     каждой уцелевшей модели по истории продаж. Возвращает отчёт для /models.
     """
     collection = sub["collectionName"]
-    probed = _probe_model_floors(client, collection, model_floors, account)
+    # добор цен зависит только от коллекции, поэтому подписки на одну и ту же
+    # коллекцию переиспользуют результат в пределах одного прохода
+    if collection in probe_cache:
+        probed = probe_cache[collection]
+    else:
+        probed = _probe_model_floors(client, collection, model_floors, account)
+        probe_cache[collection] = probed
     all_floors = dict(model_floors)
     all_floors.update(probed)
 
@@ -257,26 +265,60 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     }
 
 
-def run_cycle(account) -> bool:
+def run_cycle(account, force_models: bool = False) -> bool:
     """
     account: state.AccountState. Синхронная функция — вызывать через asyncio.to_thread из бота.
+
+    Цикл состоит из двух фаз с разной частотой: цены пересчитываются каждый раз
+    (быстро), а состав моделей — раз в models_interval_h или по force_models.
     Возвращает False, если цикл пропущен, потому что предыдущий ещё не закончился.
     """
     if not _CYCLE_LOCK.acquire(blocking=False):
         log.warning("[%s] предыдущий цикл ещё идёт — пропускаю запуск", account.name)
         return False
     try:
-        _run_cycle_locked(account)
+        _run_cycle_locked(account, force_models)
     finally:
         _CYCLE_LOCK.release()
     return True
 
 
-def _run_cycle_locked(account):
+def _models_due(account, now: float, force: bool) -> bool:
+    """
+    Состав моделей пересматривается по своему, редкому расписанию: он меняется
+    медленно, а полный проход по всем моделям стоит сотен запросов. Цены при
+    этом обновляются каждым циклом, как и раньше.
+    """
+    if account.models_mode == "off":
+        return False
+    if force or account.last_models_ts is None:
+        return True
+    return now - account.last_models_ts >= account.models_interval_h * 3600
+
+
+def _push_subscription(client, sub: dict, account, new_price: float, new_models=None) -> bool:
+    """Отправляет PUT с новой ценой и (если задан) новым набором моделей."""
+    body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
+    body["portalsAutobuyMaxPrice"] = new_price
+    if new_models is not None:
+        body["modelNames"] = new_models
+    # numberPattern: сервер валидирует regex ^[A-Za-z0-9]+$ — пустая
+    # строка/null его не проходят, поэтому при отсутствии паттерна
+    # поле нужно не отправлять вовсе, а не слать "" или null.
+    if not body.get("numberPattern"):
+        body.pop("numberPattern", None)
+    try:
+        client.update_subscription(sub["_id"], body)
+        return True
+    except ApiError as e:
+        account.record_error(f"[{sub.get('subscriptionName', sub['_id'])}] update_subscription: {e}")
+        return False
+
+
+def _run_cycle_locked(account, force_models: bool):
     now = time.time()
     account.last_run_ts = now
     account.errors.clear()  # буфер /errors отражает только текущий цикл, а не всю историю
-    account.last_models = {}
     updated = 0
     skipped = 0
     client = account.client
@@ -293,6 +335,8 @@ def _run_cycle_locked(account):
         account.last_requests = client.request_count
         return
 
+    # --- Фаза 1: цены. Быстрая, идёт каждый цикл, 3 запроса на подписку. ---
+    scans = {}
     for sub in subs:
         if not _eligible(sub):
             continue
@@ -307,52 +351,54 @@ def _run_cycle_locked(account):
         is_fon = _is_fon_order(sub)
         markup_mult = markup_mult_fon if is_fon else markup_mult_model
         markup_pct = account.markup_pct_fon if is_fon else account.markup_pct
-
-        new_models = None
-        # Заказы на фоны не трогаем: у них листинги отфильтрованы по backdropNames,
-        # и floor-цены моделей несопоставимы с ценами коллекции без фильтра.
-        # При models_mode == "off" отбор не считается вовсе — ни одного лишнего запроса.
-        if not is_fon and account.models_mode != "off":
-            report = _select_models(client, sub, floor, model_floors, account, now)
-            report["applied"] = bool(report["picked"]) and account.models_mode == "on"
-            account.last_models[name] = report
-            if account.models_mode == "on":
-                if report["picked"]:
-                    new_models = report["picked"]
-                    # запоминаем ручной список до первой перезаписи — вернуть его
-                    # иначе будет неоткуда (/restoremodels)
-                    account.original_models.setdefault(sub["_id"], sub.get("modelNames") or [])
-                else:
-                    # пустой modelNames означает ВСЕ модели коллекции (см. доки),
-                    # поэтому при пустом отборе набор моделей оставляем как есть
-                    log.warning("[%s/%s] автоподбор не дал ни одной модели — modelNames не трогаем",
-                                account.name, name)
-
         new_price = round(floor * markup_mult, 2)
         old_price = sub.get("portalsAutobuyMaxPrice")
-        models_changed = new_models is not None and sorted(new_models) != sorted(sub.get("modelNames") or [])
-        if old_price is not None and abs(new_price - old_price) < MIN_DELTA and not models_changed:
+        scans[sub["_id"]] = (sub, floor, model_floors, new_price)
+
+        if old_price is not None and abs(new_price - old_price) < MIN_DELTA:
             skipped += 1
             continue
-
-        body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
-        body["portalsAutobuyMaxPrice"] = new_price
-        if new_models is not None:
-            body["modelNames"] = new_models
-        # numberPattern: сервер валидирует regex ^[A-Za-z0-9]+$ — пустая
-        # строка/null его не проходят, поэтому при отсутствии паттерна
-        # поле нужно не отправлять вовсе, а не слать "" или null.
-        if not body.get("numberPattern"):
-            body.pop("numberPattern", None)
-
-        try:
-            client.update_subscription(sub["_id"], body)
+        if _push_subscription(client, sub, account, new_price):
             updated += 1
-            log.info("[%s/%s] обновлено (%s): %s -> %s TON (floor %.2f, +%.1f%%)%s",
-                      account.name, name, "фон" if is_fon else "модель", old_price, new_price, floor, markup_pct,
-                      f", моделей: {len(new_models)}" if new_models is not None else "")
-        except ApiError as e:
-            account.record_error(f"[{name}] update_subscription: {e}")
+            log.info("[%s/%s] цена (%s): %s -> %s TON (floor %.2f, +%.1f%%)",
+                     account.name, name, "фон" if is_fon else "модель",
+                     old_price, new_price, floor, markup_pct)
+
+    # --- Фаза 2: состав моделей. Медленная, идёт раз в models_interval_h. ---
+    if _models_due(account, now, force_models):
+        account.last_models = {}
+        probe_cache = {}
+        picked_total = 0
+        log.info("[%s] пересматриваю состав моделей (режим %s)", account.name, account.models_mode)
+        for sub, floor, model_floors, new_price in scans.values():
+            if _is_fon_order(sub):
+                continue  # фоны не трогаем: их листинги отфильтрованы по backdropNames
+            name = sub.get("subscriptionName", sub["_id"])
+            report = _select_models(client, sub, floor, model_floors, account, now, probe_cache)
+            report["applied"] = False
+            account.last_models[name] = report
+            picked_total += len(report["picked"])
+
+            if account.models_mode != "on":
+                continue
+            if not report["picked"]:
+                # пустой modelNames означает ВСЕ модели коллекции (см. доки),
+                # поэтому при пустом отборе набор моделей оставляем как есть
+                log.warning("[%s/%s] отбор не дал ни одной модели — modelNames не трогаем",
+                            account.name, name)
+                continue
+            if sorted(report["picked"]) == sorted(sub.get("modelNames") or []):
+                continue  # состав не изменился, PUT не нужен
+            # запоминаем ручной список до первой перезаписи — вернуть его иначе неоткуда
+            account.original_models.setdefault(sub["_id"], sub.get("modelNames") or [])
+            if _push_subscription(client, sub, account, new_price, report["picked"]):
+                report["applied"] = True
+                updated += 1
+                log.info("[%s/%s] состав моделей обновлён: %d шт.",
+                         account.name, name, len(report["picked"]))
+
+        account.last_models_ts = now
+        log.info("[%s] пересмотр моделей закончен, подобрано суммарно %d моделей", account.name, picked_total)
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
