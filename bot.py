@@ -8,8 +8,9 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
+import menu
 from api_client import GiftApiClient
 from state import AccountState, load_persisted, save_persisted, load_global_settings, save_global_settings
 from updater import run_cycle
@@ -66,16 +67,7 @@ def authorized(update: Update) -> bool:
     return update.effective_chat.id in ALLOWED_CHAT_IDS
 
 
-def fmt_ago(ts) -> str:
-    if not ts:
-        return "ещё не запускался"
-    import time
-    secs = int(time.time() - ts)
-    if secs < 60:
-        return f"{secs}с назад"
-    if secs < 3600:
-        return f"{secs // 60}м назад"
-    return f"{secs // 3600}ч назад"
+fmt_ago = menu.fmt_ago  # одна реализация на команды и на меню
 
 
 def get_account_or_reply(accounts: dict, name: str):
@@ -91,6 +83,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
     await update.message.reply_text(
+        "/menu — интерактивное меню (всё то же самое, но кнопками)\n"
+        "\n"
         "/status — сводка по аккаунтам\n"
         "/errors — сводка ошибок\n"
         "/subs — активные автобай-подписки\n"
@@ -616,36 +610,7 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _unknown_account_reply(update, accounts)
         return
 
-    lines = []
-    for acc in targets:
-        if not acc.last_models:
-            lines.append(
-                f"[{acc.name}] данных нет — цикл ещё не отработал или нет заказов на модели. /forceupdate"
-            )
-            continue
-        lines.append(f"[{acc.name}] режим {acc.models_mode}"
-                     + (" — показано то, что бот выбрал бы, подписки не тронуты"
-                        if acc.models_mode == "preview" else "") + ":")
-        for sub_name, rep in acc.last_models.items():
-            lines.append(
-                f"  • {sub_name}: моделей видно {rep['seen']}, порог {rep['threshold']:.2f} TON → "
-                f"кандидатов {rep['candidates']}, "
-                f"{'применено' if rep['applied'] else 'подобрано (не применено)'} {len(rep['picked'])}"
-            )
-            for model in rep["picked"][:15]:
-                d = rep["details"][model]
-                lines.append(f"    ✅ {model}: {d['floor']:.2f} TON, медиана продаж {d['median']:.2f} "
-                             f"(по {d['used']} сделкам)")
-            if len(rep["picked"]) > 15:
-                lines.append(f"    … и ещё {len(rep['picked']) - 15}")
-            for model in rep["pumped"][:10]:
-                d = rep["details"][model]
-                lines.append(f"    🚀 {model}: сейчас {d['floor']:.2f} против медианы {d['median']:.2f} — памп")
-            if rep["no_data"]:
-                lines.append(f"    ⏳ мало сделок для проверки ({len(rep['no_data'])}): "
-                             + ", ".join(rep["no_data"][:8]))
-
-    text = "\n".join(lines)
+    text = "\n\n".join(menu.models_report_text(acc) for acc in targets)
     for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
         await update.message.reply_text(text[i:i + 4000])
 
@@ -828,8 +793,13 @@ def main():
     app = Application.builder().token(TG_BOT_TOKEN).build()
     app.bot_data["accounts"] = accounts
     app.bot_data["cycle_seconds"] = cycle_seconds
+    # меню не импортирует bot.py (иначе вышел бы circular import), нужное отдаём через bot_data
+    app.bot_data["authorized"] = authorized
+    app.bot_data["restore_models"] = _restore_models
 
     app.add_handler(CommandHandler(["start", "help"], cmd_help))
+    app.add_handler(CommandHandler("menu", menu.cmd_menu))
+    app.add_handler(CallbackQueryHandler(menu.on_callback, pattern=r"^mn\|"))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("errors", cmd_errors))
     app.add_handler(CommandHandler("subs", cmd_subs))

@@ -1,0 +1,436 @@
+"""
+Интерактивное меню на инлайн-кнопках.
+
+Дублирует то, что доступно командами, но без запоминания синтаксиса. Команды
+никуда не деваются — меню это просто вторая дверь к тем же настройкам.
+
+Модуль намеренно не импортирует bot.py: это bot.py импортирует menu, а всё
+нужное (аккаунты, функция проверки доступа) лежит в context.bot_data.
+"""
+import asyncio
+import logging
+from datetime import datetime
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
+from telegram.ext import ContextTypes
+
+from state import save_persisted
+from updater import run_cycle
+
+log = logging.getLogger("menu")
+
+CB = "mn"  # префикс callback_data, чтобы не пересекаться с чужими кнопками
+
+# Шаг изменения и границы для кнопок «плюс/минус».
+LIMITS = {
+    "premium_pct": (0.0, 1000.0),
+    "tol_pct": (1.0, 200.0),
+    "markup_pct": (0.0, 100.0),
+    "markup_pct_fon": (0.0, 100.0),
+}
+
+
+def _cb(*parts) -> str:
+    """callback_data ограничен 64 байтами, поэтому аккаунты адресуем номером, а не именем."""
+    return "|".join([CB, *(str(p) for p in parts)])
+
+
+def _accounts_list(context) -> list:
+    return list(context.bot_data["accounts"].values())
+
+
+def _acc_by_index(context, idx):
+    accounts = _accounts_list(context)
+    idx = int(idx)
+    return accounts[idx] if 0 <= idx < len(accounts) else None
+
+
+def fmt_ago(ts) -> str:
+    if not ts:
+        return "ещё не запускался"
+    import time
+    secs = int(time.time() - ts)
+    if secs < 60:
+        return f"{secs}с назад"
+    if secs < 3600:
+        return f"{secs // 60}м назад"
+    if secs < 86400:
+        return f"{secs // 3600}ч назад"
+    return f"{secs // 86400}д назад"
+
+
+# --- Тексты, общие для меню и для команд ---
+
+def models_report_text(acc) -> str:
+    """Отчёт по последнему пересмотру моделей. Используется и в /models, и в меню."""
+    if not acc.last_models:
+        return (f"[{acc.name}] отчёта пока нет — пересмотр моделей ещё не запускался.\n"
+                f"Режим сейчас: {acc.models_mode}")
+
+    lines = [f"[{acc.name}] режим {acc.models_mode}"
+             + (" — показано то, что бот выбрал бы, подписки не тронуты"
+                if acc.models_mode == "preview" else "") + ":"]
+    for sub_name, rep in acc.last_models.items():
+        lines.append(
+            f"\n• {sub_name}\n"
+            f"  порог {rep['threshold']:.2f} TON, моделей видно {rep['seen']}, "
+            f"кандидатов {rep['candidates']}, "
+            f"{'применено' if rep['applied'] else 'подобрано'} {len(rep['picked'])}"
+        )
+        for model in rep["picked"][:15]:
+            d = rep["details"][model]
+            lines.append(f"  ✅ {model}: {d['floor']:.2f} TON, медиана продаж {d['median']:.2f} "
+                         f"(по {d['used']} сделкам)")
+        if len(rep["picked"]) > 15:
+            lines.append(f"  … и ещё {len(rep['picked']) - 15}")
+        for model in rep["pumped"][:10]:
+            d = rep["details"][model]
+            lines.append(f"  🚀 {model}: сейчас {d['floor']:.2f} против медианы {d['median']:.2f} — памп")
+        if rep["no_data"]:
+            lines.append(f"  ⏳ мало сделок для проверки ({len(rep['no_data'])}): "
+                         + ", ".join(rep["no_data"][:8]))
+    return "\n".join(lines)
+
+
+def _account_text(acc) -> str:
+    return "\n".join([
+        f"📋 {acc.name}",
+        f"Статус: {'⏸ на паузе' if acc.paused else '▶️ активен'}",
+        f"Наценки: модели +{acc.markup_pct:g}%, фоны +{acc.markup_pct_fon:g}%",
+        f"Автоподбор моделей: {acc.models_mode}",
+        f"Последний пересчёт цен: {fmt_ago(acc.last_run_ts)}",
+        f"Последний пересмотр моделей: {fmt_ago(acc.last_models_ts)}",
+        f"Обновлено: {acc.last_updated_count}, пропущено: {acc.last_skipped_count}, "
+        f"запросов: {acc.last_requests}",
+        f"Ошибок в буфере: {len(acc.errors)}",
+    ])
+
+
+def _automodels_text(acc) -> str:
+    return "\n".join([
+        f"🤖 Автоподбор моделей — {acc.name}",
+        f"Текущий режим: {acc.models_mode}",
+        "",
+        "❌ off — не считать вовсе, как будто автоподбора нет",
+        "👁 preview — посчитать и показать в отчёте, подписки не трогать",
+        "✅ on — считать и применять к подпискам",
+        "",
+        f"Отбор: модели дороже floor коллекции на +{acc.premium_pct:g}%,",
+        f"памп — если цена выше медианы продаж более чем на {acc.tol_pct:g}%.",
+        f"Пересмотр раз в {acc.models_interval_h:g}ч, последний — {fmt_ago(acc.last_models_ts)}.",
+    ])
+
+
+def _params_text(acc) -> str:
+    return "\n".join([
+        f"⚙️ Параметры отбора — {acc.name}",
+        "",
+        f"Премия над floor: +{acc.premium_pct:g}%  (какая выгода тебя устраивает)",
+        f"Допуск пампа: {acc.tol_pct:g}%  (насколько цена может быть выше истории)",
+        f"Глубина истории: {acc.sales_depth} продаж",
+        f"Свежие сделки не в счёт: {acc.fresh_hours:g}ч",
+        f"Минимум сделок: {acc.min_sales}",
+        f"Добор цен: {'все модели' if not acc.probe_limit else f'до {acc.probe_limit}'} "
+        f"по {acc.probe_markets} маркет(ам)",
+        f"Пересмотр состава: раз в {acc.models_interval_h:g}ч",
+    ])
+
+
+# --- Клавиатуры ---
+
+def _main_kb(context) -> InlineKeyboardMarkup:
+    rows = [[
+        InlineKeyboardButton("📊 Статус", callback_data=_cb("status")),
+        InlineKeyboardButton("⚠️ Ошибки", callback_data=_cb("errors")),
+    ]]
+    accounts = _accounts_list(context)
+    for i in range(0, len(accounts), 2):
+        rows.append([
+            InlineKeyboardButton(f"⚙️ {acc.name}", callback_data=_cb("acc", i + j))
+            for j, acc in enumerate(accounts[i:i + 2])
+        ])
+    rows.append([InlineKeyboardButton("🔄 Пересчитать цены (все)", callback_data=_cb("forceall"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _account_kb(idx, acc) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("▶️ Возобновить" if acc.paused else "⏸ Пауза",
+                                 callback_data=_cb("pause", idx)),
+            InlineKeyboardButton("🔄 Цены сейчас", callback_data=_cb("force", idx)),
+        ],
+        [
+            InlineKeyboardButton("🤖 Автоподбор", callback_data=_cb("auto", idx)),
+            InlineKeyboardButton("📈 Отчёт моделей", callback_data=_cb("report", idx)),
+        ],
+        [
+            InlineKeyboardButton("💰 Наценки", callback_data=_cb("markup", idx)),
+            InlineKeyboardButton("⚙️ Параметры отбора", callback_data=_cb("params", idx)),
+        ],
+        [InlineKeyboardButton("◀️ Назад", callback_data=_cb("main"))],
+    ])
+
+
+def _automodels_kb(idx, acc) -> InlineKeyboardMarkup:
+    mark = lambda mode, label: ("• " + label) if acc.models_mode == mode else label
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(mark("off", "❌ off"), callback_data=_cb("mode", idx, "off")),
+            InlineKeyboardButton(mark("preview", "👁 preview"), callback_data=_cb("mode", idx, "preview")),
+            InlineKeyboardButton(mark("on", "✅ on"), callback_data=_cb("mode", idx, "on")),
+        ],
+        [InlineKeyboardButton("🔁 Пересмотреть модели сейчас", callback_data=_cb("refresh", idx))],
+        [InlineKeyboardButton("↩️ Вернуть ручные модели", callback_data=_cb("restore", idx))],
+        [InlineKeyboardButton("◀️ Назад", callback_data=_cb("acc", idx))],
+    ])
+
+
+def _params_kb(idx, acc) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("−10", callback_data=_cb("set", idx, "premium_pct", -10)),
+            InlineKeyboardButton(f"Премия +{acc.premium_pct:g}%", callback_data=_cb("noop")),
+            InlineKeyboardButton("+10", callback_data=_cb("set", idx, "premium_pct", 10)),
+        ],
+        [
+            InlineKeyboardButton("−5", callback_data=_cb("set", idx, "tol_pct", -5)),
+            InlineKeyboardButton(f"Допуск {acc.tol_pct:g}%", callback_data=_cb("noop")),
+            InlineKeyboardButton("+5", callback_data=_cb("set", idx, "tol_pct", 5)),
+        ],
+        [
+            InlineKeyboardButton(("• " if acc.sales_depth == d else "") + f"{d} продаж",
+                                 callback_data=_cb("depth", idx, d))
+            for d in (20, 40, 100)
+        ],
+        [
+            InlineKeyboardButton(("• " if acc.probe_markets == m else "") + f"{m} маркет",
+                                 callback_data=_cb("markets", idx, m))
+            for m in (1, 2, 3)
+        ],
+        [
+            InlineKeyboardButton(("• " if acc.models_interval_h == h else "") + f"{h}ч",
+                                 callback_data=_cb("interval", idx, h))
+            for h in (24, 48, 72)
+        ],
+        [InlineKeyboardButton("◀️ Назад", callback_data=_cb("acc", idx))],
+    ])
+
+
+def _markup_kb(idx, acc) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("−1", callback_data=_cb("set", idx, "markup_pct", -1)),
+            InlineKeyboardButton(f"Модели +{acc.markup_pct:g}%", callback_data=_cb("noop")),
+            InlineKeyboardButton("+1", callback_data=_cb("set", idx, "markup_pct", 1)),
+        ],
+        [
+            InlineKeyboardButton("−1", callback_data=_cb("set", idx, "markup_pct_fon", -1)),
+            InlineKeyboardButton(f"Фоны +{acc.markup_pct_fon:g}%", callback_data=_cb("noop")),
+            InlineKeyboardButton("+1", callback_data=_cb("set", idx, "markup_pct_fon", 1)),
+        ],
+        [InlineKeyboardButton("◀️ Назад", callback_data=_cb("acc", idx))],
+    ])
+
+
+def _back_kb(idx=None) -> InlineKeyboardMarkup:
+    target = _cb("acc", idx) if idx is not None else _cb("main")
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=target)]])
+
+
+# --- Обработчики ---
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/menu — открыть интерактивное меню."""
+    if not context.bot_data["authorized"](update):
+        return
+    accounts = _accounts_list(context)
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+    await update.message.reply_text(
+        f"🤖 GiftSatellite\nАккаунтов: {len(accounts)}\n\nВыбери, что нужно:",
+        reply_markup=_main_kb(context),
+    )
+
+
+async def _show(query, text: str, kb):
+    """Телеграм ругается, если текст и клавиатура не изменились — это не ошибка, глушим."""
+    try:
+        await query.edit_message_text(text, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not context.bot_data["authorized"](update):
+        await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()  # гасим «часики» на кнопке сразу
+
+    parts = query.data.split("|")[1:]
+    action = parts[0]
+    accounts = context.bot_data["accounts"]
+
+    if action == "noop":
+        return
+
+    if action == "main":
+        await _show(query, f"🤖 GiftSatellite\nАккаунтов: {len(accounts)}\n\nВыбери, что нужно:",
+                    _main_kb(context))
+        return
+
+    if action == "status":
+        lines = ["📊 Все аккаунты:"]
+        for acc in accounts.values():
+            lines.append(
+                f"{'⏸' if acc.paused else '▶️'} {acc.name}: автоподбор {acc.models_mode} | "
+                f"обновлено {acc.last_updated_count} | {fmt_ago(acc.last_run_ts)} | "
+                f"{f'⚠️{len(acc.errors)}' if acc.errors else '✅'}"
+            )
+        await _show(query, "\n".join(lines), _back_kb())
+        return
+
+    if action == "errors":
+        lines = ["⚠️ Ошибки:"]
+        for acc in accounts.values():
+            if not acc.errors:
+                lines.append(f"[{acc.name}] ошибок нет ✅")
+                continue
+            ts, msg = acc.errors[-1]
+            t = datetime.fromtimestamp(ts).strftime("%d.%m %H:%M:%S")
+            lines.append(f"[{acc.name}] {len(acc.errors)} шт., последняя [{t}]: {msg[:200]}")
+        await _show(query, "\n".join(lines)[:4000], _back_kb())
+        return
+
+    if action == "forceall":
+        active = [a for a in accounts.values() if not a.paused]
+        if not active:
+            await _show(query, "Все аккаунты на паузе, обновлять нечего", _back_kb())
+            return
+        await _show(query, f"🔄 Пересчитываю цены для {len(active)} аккаунт(ов)...", None)
+        ran_any = False
+        for acc in active:
+            ran_any |= await asyncio.to_thread(run_cycle, acc)
+        if not ran_any:
+            await _show(query, "Цикл уже идёт — дождись окончания и повтори.", _back_kb())
+            return
+        lines = ["✅ Готово:"]
+        for acc in active:
+            lines.append(f"[{acc.name}] обновлено {acc.last_updated_count}, "
+                         f"пропущено {acc.last_skipped_count}, запросов {acc.last_requests}")
+        save_persisted(accounts)
+        await _show(query, "\n".join(lines), _back_kb())
+        return
+
+    # дальше всё привязано к конкретному аккаунту
+    idx = parts[1]
+    acc = _acc_by_index(context, idx)
+    if acc is None:
+        await _show(query, "Аккаунт не найден — открой меню заново: /menu", None)
+        return
+
+    if action == "acc":
+        await _show(query, _account_text(acc), _account_kb(idx, acc))
+        return
+
+    if action == "pause":
+        acc.paused = not acc.paused
+        save_persisted(accounts)
+        await _show(query, _account_text(acc), _account_kb(idx, acc))
+        return
+
+    if action == "force":
+        await _show(query, f"🔄 [{acc.name}] пересчитываю цены...", None)
+        ran = await asyncio.to_thread(run_cycle, acc)
+        text = (f"[{acc.name}] готово: обновлено {acc.last_updated_count}, "
+                f"пропущено {acc.last_skipped_count}, запросов {acc.last_requests}, "
+                f"ошибок {len(acc.errors)}") if ran else "Цикл уже идёт — повтори позже."
+        save_persisted(accounts)
+        await _show(query, text, _back_kb(idx))
+        return
+
+    if action == "auto":
+        await _show(query, _automodels_text(acc), _automodels_kb(idx, acc))
+        return
+
+    if action == "mode":
+        acc.models_mode = parts[2]
+        save_persisted(accounts)
+        await _show(query, _automodels_text(acc), _automodels_kb(idx, acc))
+        return
+
+    if action == "refresh":
+        if acc.models_mode == "off":
+            await _show(query, f"[{acc.name}] автоподбор выключен. Включи preview или on.",
+                        _automodels_kb(idx, acc))
+            return
+        await _show(query, f"🔁 [{acc.name}] полный пересмотр моделей. Это надолго — "
+                           f"перебираются все модели всех коллекций. Дождись отчёта.", None)
+        ran = await asyncio.to_thread(run_cycle, acc, True)
+        if not ran:
+            await _show(query, "Цикл уже идёт — повтори позже.", _back_kb(idx))
+            return
+        picked = sum(len(r["picked"]) for r in acc.last_models.values())
+        applied = sum(1 for r in acc.last_models.values() if r.get("applied"))
+        save_persisted(accounts)
+        await _show(query, f"[{acc.name}] готово: подписок разобрано {len(acc.last_models)}, "
+                           f"моделей подобрано {picked}, подписок обновлено {applied}, "
+                           f"запросов {acc.last_requests}, ошибок {len(acc.errors)}",
+                    _automodels_kb(idx, acc))
+        return
+
+    if action == "restore":
+        if acc.models_mode == "on":
+            await _show(query, f"[{acc.name}] сначала переключи режим в off — иначе следующий "
+                               f"пересмотр снова перепишет модели.", _automodels_kb(idx, acc))
+            return
+        if not acc.original_models:
+            await _show(query, f"[{acc.name}] нечего возвращать — бот ещё не переписывал модели.",
+                        _automodels_kb(idx, acc))
+            return
+        restored, failed = await asyncio.to_thread(context.bot_data["restore_models"], acc)
+        save_persisted(accounts)
+        await _show(query, f"[{acc.name}] восстановлено подписок: {restored}"
+                           + (f", ошибок: {failed}" if failed else ""), _automodels_kb(idx, acc))
+        return
+
+    if action == "report":
+        await _show(query, models_report_text(acc)[:4000], _back_kb(idx))
+        return
+
+    if action == "params":
+        await _show(query, _params_text(acc), _params_kb(idx, acc))
+        return
+
+    if action == "markup":
+        await _show(query, f"💰 Наценки над floor — {acc.name}\n\n"
+                           f"Модели: +{acc.markup_pct:g}%\nФоны: +{acc.markup_pct_fon:g}%",
+                    _markup_kb(idx, acc))
+        return
+
+    if action == "set":
+        field, delta = parts[2], float(parts[3])
+        low, high = LIMITS[field]
+        setattr(acc, field, min(high, max(low, getattr(acc, field) + delta)))
+        save_persisted(accounts)
+        if field.startswith("markup"):
+            await _show(query, f"💰 Наценки над floor — {acc.name}\n\n"
+                               f"Модели: +{acc.markup_pct:g}%\nФоны: +{acc.markup_pct_fon:g}%",
+                        _markup_kb(idx, acc))
+        else:
+            await _show(query, _params_text(acc), _params_kb(idx, acc))
+        return
+
+    if action in ("depth", "markets", "interval"):
+        field = {"depth": "sales_depth", "markets": "probe_markets", "interval": "models_interval_h"}[action]
+        value = float(parts[2])
+        setattr(acc, field, value if field == "models_interval_h" else int(value))
+        save_persisted(accounts)
+        await _show(query, _params_text(acc), _params_kb(idx, acc))
+        return
+
+    log.warning("неизвестное действие меню: %s", query.data)
