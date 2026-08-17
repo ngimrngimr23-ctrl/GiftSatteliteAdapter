@@ -45,7 +45,7 @@ def build_accounts() -> dict:
         acc.markup_pct = saved.get("markup_pct", acc.markup_pct)
         acc.markup_pct_fon = saved.get("markup_pct_fon", acc.markup_pct_fon)
         acc.paused = saved.get("paused", acc.paused)
-        acc.auto_models = saved.get("auto_models", acc.auto_models)
+        acc.models_mode = saved.get("models_mode", acc.models_mode)
         acc.premium_pct = saved.get("premium_pct", acc.premium_pct)
         acc.tol_pct = saved.get("tol_pct", acc.tol_pct)
         acc.sales_depth = saved.get("sales_depth", acc.sales_depth)
@@ -94,7 +94,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/subs — активные автобай-подписки\n"
         "/setmarkup <%> — наценка над floor для заказов на модели\n"
         "/setmarkupfon <%> — наценка над floor для заказов на фоны (подписки с заданным backdropNames)\n"
-        "/automodels on|off — автоподбор моделей в заказ (без аргумента — показать настройки)\n"
+        "/automodels on|off|preview — автоподбор моделей: применять / не считать вовсе / "
+        "считать и показывать в /models, ничего не меняя\n"
         "/setpremium <%> — насколько выше floor коллекции должна стоить модель, чтобы попасть в заказ\n"
         "/setpumptol <%> — насколько цена может превышать медиану продаж, прежде чем это памп\n"
         "/setsalesdepth <n> — сколько последних продаж смотреть (20/40/100)\n"
@@ -126,7 +127,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Статус: {'⏸ на паузе' if acc.paused else '▶️ активен'}",
             f"Наценка (модели): +{acc.markup_pct}%",
             f"Наценка (фоны): +{acc.markup_pct_fon}%",
-            f"Автоподбор моделей: {'вкл' if acc.auto_models else 'выкл'} "
+            f"Автоподбор моделей: {acc.models_mode} "
             f"(премия от +{acc.premium_pct:g}%, памп при +{acc.tol_pct:g}% над историей)",
             f"Последний запуск: {fmt_ago(acc.last_run_ts)}",
             f"Обновлено цен: {acc.last_updated_count}, пропущено: {acc.last_skipped_count}",
@@ -344,7 +345,7 @@ async def cmd_automodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["🤖 Автоподбор моделей:"]
         for acc in targets:
             lines.append(
-                f"[{acc.name}] {'включён ✅' if acc.auto_models else 'выключен ❌'}\n"
+                f"[{acc.name}] режим: {acc.models_mode}\n"
                 f"  премия: модель должна стоить от +{acc.premium_pct:g}% к floor коллекции\n"
                 f"  памп: цена выше медианы продаж более чем на {acc.tol_pct:g}%\n"
                 f"  история: {acc.sales_depth} последних продаж, свежие {acc.fresh_hours:g}ч в базу не идут, "
@@ -356,26 +357,25 @@ async def cmd_automodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     value = rest[0].lower()
-    if value in ("on", "вкл"):
-        enabled = True
-    elif value in ("off", "выкл"):
-        enabled = False
-    else:
-        await update.message.reply_text("Использование: /automodels [<acc>] on|off")
+    aliases = {"on": "on", "вкл": "on", "off": "off", "выкл": "off",
+               "preview": "preview", "превью": "preview", "тест": "preview"}
+    mode = aliases.get(value)
+    if mode is None:
+        await update.message.reply_text("Использование: /automodels [<acc>] on|off|preview")
         return
 
     for acc in targets:
-        acc.auto_models = enabled
+        acc.models_mode = mode
     save_persisted(accounts)
     who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
-    await update.message.reply_text(
-        f"Автоподбор моделей {'включён ✅' if enabled else 'выключен ❌'} для {who}."
-        + (
-            "\nБот сам перепишет modelNames подписок при следующем пересчёте. "
-            "Прежние ручные списки сохранятся — вернуть их можно через /restoremodels."
-            if enabled else "\nmodelNames подписок останутся такими, какие есть сейчас."
-        )
-    )
+    explain = {
+        "off": "Отбор не считается вовсе — ни одного лишнего запроса, поведение как до автоподбора.",
+        "preview": "Бот считает отбор и показывает его в /models, но modelNames НЕ трогает. "
+                   "Цикл станет заметно дольше — это цена запросов к истории.",
+        "on": "Бот будет переписывать modelNames подписок при каждом пересчёте. "
+              "Прежние ручные списки сохранятся — вернуть их можно через /restoremodels.",
+    }[mode]
+    await update.message.reply_text(f"[{who}] режим автоподбора: {mode}\n{explain}")
 
 
 async def _cmd_setnumber(update, context, field: str, cmd: str, example: str, describe):
@@ -498,7 +498,7 @@ async def cmd_restoremodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not acc.original_models:
             lines.append(f"[{acc.name}] нечего восстанавливать — бот ещё не переписывал modelNames")
             continue
-        if acc.auto_models:
+        if acc.models_mode == "on":
             lines.append(
                 f"[{acc.name}] сначала выключи автоподбор: /automodels {acc.name} off — "
                 f"иначе следующий цикл снова перепишет модели"
@@ -561,7 +561,9 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"[{acc.name}] данных нет — цикл ещё не отработал или нет заказов на модели. /forceupdate"
             )
             continue
-        lines.append(f"[{acc.name}] {'автоподбор включён' if acc.auto_models else 'автоподбор ВЫКЛЮЧЕН (только анализ)'}:")
+        lines.append(f"[{acc.name}] режим {acc.models_mode}"
+                     + (" — показано то, что бот выбрал бы, подписки не тронуты"
+                        if acc.models_mode == "preview" else "") + ":")
         for sub_name, rep in acc.last_models.items():
             lines.append(
                 f"  • {sub_name}: моделей видно {rep['seen']}, порог {rep['threshold']:.2f} TON → "

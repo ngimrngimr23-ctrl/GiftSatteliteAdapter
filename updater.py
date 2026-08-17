@@ -311,11 +311,12 @@ def _run_cycle_locked(account):
         new_models = None
         # Заказы на фоны не трогаем: у них листинги отфильтрованы по backdropNames,
         # и floor-цены моделей несопоставимы с ценами коллекции без фильтра.
-        if not is_fon:
+        # При models_mode == "off" отбор не считается вовсе — ни одного лишнего запроса.
+        if not is_fon and account.models_mode != "off":
             report = _select_models(client, sub, floor, model_floors, account, now)
-            report["applied"] = bool(report["picked"]) and account.auto_models
+            report["applied"] = bool(report["picked"]) and account.models_mode == "on"
             account.last_models[name] = report
-            if account.auto_models:
+            if account.models_mode == "on":
                 if report["picked"]:
                     new_models = report["picked"]
                     # запоминаем ручной список до первой перезаписи — вернуть его

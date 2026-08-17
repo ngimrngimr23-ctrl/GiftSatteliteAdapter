@@ -30,7 +30,10 @@ class AccountState:
     markup_pct_fon: float = 3.0  # наценка для заказов на фоны (подписки с заданным backdropNames)
     paused: bool = False
     # --- автоподбор моделей в заказ ---
-    auto_models: bool = False  # выключен по умолчанию: включение меняет modelNames живых подписок
+    # off — автоподбор не работает и не стоит ни одного запроса (поведение старого бота);
+    # preview — считает и показывает в /models, но modelNames не трогает;
+    # on — считает и применяет.
+    models_mode: str = "off"
     premium_pct: float = 50.0  # на сколько % выше floor коллекции должна стоить модель (порог)
     tol_pct: float = 15.0  # насколько текущая цена может превышать медиану продаж, прежде чем это памп
     sales_depth: int = 100  # сколько последних продаж смотреть (кратно 20 — размеру страницы истории)
@@ -55,7 +58,7 @@ class AccountState:
             "markup_pct": self.markup_pct,
             "markup_pct_fon": self.markup_pct_fon,
             "paused": self.paused,
-            "auto_models": self.auto_models,
+            "models_mode": self.models_mode,
             "premium_pct": self.premium_pct,
             "tol_pct": self.tol_pct,
             "sales_depth": self.sales_depth,
