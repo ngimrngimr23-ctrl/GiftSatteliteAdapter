@@ -11,14 +11,17 @@ log = logging.getLogger("updater")
 MARKETS = ["portals", "tonnel", "mrkt"]  # где смотрим актуальную цену
 MIN_DELTA = 0.02  # не дёргать PUT, если цена изменилась меньше чем на столько TON
 HISTORY_CACHE_HOURS = 6.0  # медиана по сотне сделок за час не меняется — не перезапрашиваем каждый цикл
+PROBE_CACHE_HOURS = 6.0  # хватает, чтобы все аккаунты в рамках одного прохода взяли цены из кеша
 
 # Цикл с автоподбором идёт минутами, а /setinterval разрешает поставить 1 минуту,
 # поэтому запуски нужно защитить от наложения друг на друга.
 _CYCLE_LOCK = threading.Lock()
 
-# Рыночные данные не зависят от аккаунта, поэтому кеш общий на процесс:
-# {(collection, model): (ts, [продажи])}
-_HISTORY_CACHE: dict = {}
+# Рыночные данные не зависят от аккаунта, поэтому кеши общие на процесс:
+# несколько аккаунтов, работающих по одним и тем же коллекциям, платят за сбор
+# данных один раз, а не по разу каждый.
+_HISTORY_CACHE: dict = {}  # {(collection, model): (ts, [продажи])}
+_PROBE_CACHE: dict = {}  # {collection: (ts, {model: floor})}
 
 # Поля, которые нужно переслать обратно в PUT /user/update-subscription/:id
 # (тело идентично POST /user/subscribe)
@@ -221,20 +224,21 @@ def _fetch_sales(client, collection: str, model: str, depth: int, account, now: 
     return sales
 
 
-def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float,
-                   probe_cache: dict) -> dict:
+def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float) -> dict:
     """
     Полный отбор моделей для одной подписки: порог по премии, затем проверка
     каждой уцелевшей модели по истории продаж. Возвращает отчёт для /models.
     """
     collection = sub["collectionName"]
-    # добор цен зависит только от коллекции, поэтому подписки на одну и ту же
-    # коллекцию переиспользуют результат в пределах одного прохода
-    if collection in probe_cache:
-        probed = probe_cache[collection]
+    # Добор цен зависит только от коллекции — ни от подписки, ни от аккаунта.
+    # Поэтому результат кладём в общий кеш: и другие подписки на ту же
+    # коллекцию, и другие аккаунты берут готовое вместо сотен своих запросов.
+    cached = _PROBE_CACHE.get(collection)
+    if cached and now - cached[0] < PROBE_CACHE_HOURS * 3600:
+        probed = cached[1]
     else:
         probed = _probe_model_floors(client, collection, model_floors, account)
-        probe_cache[collection] = probed
+        _PROBE_CACHE[collection] = (now, probed)
     all_floors = dict(model_floors)
     all_floors.update(probed)
 
@@ -367,14 +371,13 @@ def _run_cycle_locked(account, force_models: bool):
     # --- Фаза 2: состав моделей. Медленная, идёт раз в models_interval_h. ---
     if _models_due(account, now, force_models):
         account.last_models = {}
-        probe_cache = {}
         picked_total = 0
         log.info("[%s] пересматриваю состав моделей (режим %s)", account.name, account.models_mode)
         for sub, floor, model_floors, new_price in scans.values():
             if _is_fon_order(sub):
                 continue  # фоны не трогаем: их листинги отфильтрованы по backdropNames
             name = sub.get("subscriptionName", sub["_id"])
-            report = _select_models(client, sub, floor, model_floors, account, now, probe_cache)
+            report = _select_models(client, sub, floor, model_floors, account, now)
             report["applied"] = False
             account.last_models[name] = report
             picked_total += len(report["picked"])
