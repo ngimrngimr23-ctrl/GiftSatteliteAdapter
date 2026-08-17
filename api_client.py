@@ -8,6 +8,10 @@ log = logging.getLogger("api_client")
 
 BASE_URL = "https://api.gift-satellite.example"  # замени на реальный базовый URL сервиса
 
+MAX_429_RETRIES = 5  # сколько раз пережидать rate limit, прежде чем сдаться
+RETRY_BACKOFF_SECONDS = 2.0  # база линейного бэкоффа: 2с, 4с, 6с, ...
+HISTORY_PAGE_SIZE = 20  # жёсткий потолок pageSize у POST /history/:collection
+
 
 class ApiError(Exception):
     pass
@@ -19,6 +23,7 @@ class GiftApiClient:
         self.base_url = base_url.rstrip("/")
         self.min_interval = min_interval  # пауза между запросами, чтобы не упираться в rate limit
         self._last_call = 0.0
+        self.request_count = 0  # сбрасывается в начале цикла — видно, во что обошёлся автоподбор
 
     def _headers(self):
         return {"Authorization": f"Token {self.token}"}
@@ -30,14 +35,22 @@ class GiftApiClient:
         self._last_call = time.monotonic()
 
     def _request(self, method: str, path: str, **kwargs):
-        self._throttle()
-        url = f"{self.base_url}{path}"
-        resp = requests.request(method, url, headers=self._headers(), timeout=15, **kwargs)
-
-        if resp.status_code == 429:
-            log.warning("429 rate limit on %s, backing off 2s", path)
-            time.sleep(2)
-            return self._request(method, path, **kwargs)
+        # Ретраи на 429 сделаны циклом, а не рекурсией: автоподбор моделей шлёт
+        # на порядок больше запросов, и затяжной rate limit при рекурсии
+        # положил бы процесс переполнением стека.
+        for attempt in range(MAX_429_RETRIES + 1):
+            self._throttle()
+            self.request_count += 1
+            url = f"{self.base_url}{path}"
+            resp = requests.request(method, url, headers=self._headers(), timeout=15, **kwargs)
+            if resp.status_code != 429:
+                break
+            if attempt == MAX_429_RETRIES:
+                raise ApiError(f"{method} {path} -> 429: rate limit не отпустил за {MAX_429_RETRIES} попыток")
+            delay = RETRY_BACKOFF_SECONDS * (attempt + 1)
+            log.warning("429 rate limit on %s, backing off %.1fs (попытка %d/%d)",
+                        path, delay, attempt + 1, MAX_429_RETRIES)
+            time.sleep(delay)
 
         if resp.status_code >= 400:
             # логируем тело запроса, которое вызвало ошибку — помогает найти,
@@ -72,3 +85,31 @@ class GiftApiClient:
         collection_enc = quote(collection, safe="")
         path = f"/search/{market}/{collection_enc}"
         return self._request("GET", path, params=params)
+
+    # --- Gift (справочные данные) ---
+    def get_models(self, collection: str):
+        """
+        GET /gift/models/:collection — полный список моделей коллекции.
+        Возвращает [{"name": ..., "rarity": ...}], отсортированный по редкости.
+        Нужен потому, что поиск отдаёт только 50 самых дешёвых листингов, и
+        дорогие модели (а именно они и интересны при отборе по премии над floor)
+        в эту выдачу не попадают.
+        """
+        collection_enc = quote(collection, safe="")
+        return self._request("GET", f"/gift/models/{collection_enc}")
+
+    # --- History (реальные продажи) ---
+    def get_history(self, collection: str, models=None, backdrops=None,
+                    sort_by: str = "date", page: int = 0, page_size: int = HISTORY_PAGE_SIZE):
+        """
+        POST /history/:collection — страница истории продаж.
+        Возвращает {"content": [...], "page": {...}}, где каждая продажа несёт
+        modelName, normalizedPrice и soldAt (ISO 8601).
+        """
+        body = {"sortBy": sort_by, "page": page, "pageSize": min(page_size, HISTORY_PAGE_SIZE)}
+        if models:
+            body["models"] = list(models)
+        if backdrops:
+            body["backdrops"] = list(backdrops)
+        collection_enc = quote(collection, safe="")
+        return self._request("POST", f"/history/{collection_enc}", json=body)

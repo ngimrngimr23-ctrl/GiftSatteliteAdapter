@@ -45,6 +45,15 @@ def build_accounts() -> dict:
         acc.markup_pct = saved.get("markup_pct", acc.markup_pct)
         acc.markup_pct_fon = saved.get("markup_pct_fon", acc.markup_pct_fon)
         acc.paused = saved.get("paused", acc.paused)
+        acc.models_mode = saved.get("models_mode", acc.models_mode)
+        acc.premium_pct = saved.get("premium_pct", acc.premium_pct)
+        acc.tol_pct = saved.get("tol_pct", acc.tol_pct)
+        acc.sales_depth = saved.get("sales_depth", acc.sales_depth)
+        acc.fresh_hours = saved.get("fresh_hours", acc.fresh_hours)
+        acc.min_sales = saved.get("min_sales", acc.min_sales)
+        acc.probe_limit = saved.get("probe_limit", acc.probe_limit)
+        acc.probe_markets = saved.get("probe_markets", acc.probe_markets)
+        acc.original_models = saved.get("original_models", {})
         accounts[name] = acc
     return accounts
 
@@ -85,13 +94,21 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/subs — активные автобай-подписки\n"
         "/setmarkup <%> — наценка над floor для заказов на модели\n"
         "/setmarkupfon <%> — наценка над floor для заказов на фоны (подписки с заданным backdropNames)\n"
+        "/automodels on|off|preview — автоподбор моделей: применять / не считать вовсе / "
+        "считать и показывать в /models, ничего не меняя\n"
+        "/setpremium <%> — насколько выше floor коллекции должна стоить модель, чтобы попасть в заказ\n"
+        "/setpumptol <%> — насколько цена может превышать медиану продаж, прежде чем это памп\n"
+        "/setsalesdepth <n> — сколько последних продаж смотреть (20/40/100)\n"
+        "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за цикл и по скольким маркетам\n"
+        "/models — что автоподбор выбрал и что отсеял в последнем цикле\n"
+        "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
         "\n"
-        "Для /status, /errors, /subs, /setmarkup, /setmarkupfon, /forceupdate: добавь <acc> вторым (для /setmarkup"
-        "/setmarkupfon — после наценки) аргументом, чтобы применить команду к одному конкретному аккаунту, "
-        "напр. /setmarkup acc1 5 или /status acc1. Без <acc> они работают сразу по всем аккаунтам."
+        "\n"
+        "Почти все команды принимают <acc> первым аргументом, чтобы применить их к одному конкретному "
+        "аккаунту, напр. /setmarkup acc1 5 или /status acc1. Без <acc> они работают сразу по всем аккаунтам."
     )
 
 
@@ -110,8 +127,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Статус: {'⏸ на паузе' if acc.paused else '▶️ активен'}",
             f"Наценка (модели): +{acc.markup_pct}%",
             f"Наценка (фоны): +{acc.markup_pct_fon}%",
+            f"Автоподбор моделей: {acc.models_mode} "
+            f"(премия от +{acc.premium_pct:g}%, памп при +{acc.tol_pct:g}% над историей)",
             f"Последний запуск: {fmt_ago(acc.last_run_ts)}",
             f"Обновлено цен: {acc.last_updated_count}, пропущено: {acc.last_skipped_count}",
+            f"Запросов к API за цикл: {acc.last_requests}",
             f"Ошибок в буфере: {len(acc.errors)}",
         ]
         if acc.errors:
@@ -280,6 +300,294 @@ async def cmd_setmarkupfon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _cmd_setmarkup_generic(update, context, "markup_pct_fon", "/setmarkupfon", "фоны")
 
 
+def _split_acc_args(accounts: dict, args: list):
+    """
+    Команды принимают либо '<acc> <аргументы...>', либо просто '<аргументы...>' (для всех аккаунтов).
+    Возвращает (targets, rest, unknown_acc): unknown_acc=True, если первый аргумент похож на имя
+    аккаунта (не число и не on/off), но такого аккаунта нет.
+    """
+    if args and args[0] in accounts:
+        return [accounts[args[0]]], args[1:], False
+    if args and not _looks_like_value(args[0]):
+        return [], args, True
+    return list(accounts.values()), args, False
+
+
+def _looks_like_value(arg: str) -> bool:
+    if arg.lower() in ("on", "off", "вкл", "выкл"):
+        return True
+    try:
+        float(arg)
+        return True
+    except ValueError:
+        return False
+
+
+async def cmd_automodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /automodels             — показать настройки автоподбора моделей
+    /automodels on|off      — включить/выключить для всех аккаунтов
+    /automodels <acc> on    — включить/выключить для одного аккаунта
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+
+    if not rest:
+        lines = ["🤖 Автоподбор моделей:"]
+        for acc in targets:
+            lines.append(
+                f"[{acc.name}] режим: {acc.models_mode}\n"
+                f"  премия: модель должна стоить от +{acc.premium_pct:g}% к floor коллекции\n"
+                f"  памп: цена выше медианы продаж более чем на {acc.tol_pct:g}%\n"
+                f"  история: {acc.sales_depth} последних продаж, свежие {acc.fresh_hours:g}ч в базу не идут, "
+                f"минимум {acc.min_sales} сделок\n"
+                f"  добор цен: до {acc.probe_limit} моделей по {acc.probe_markets} маркет(ам)"
+            )
+        lines.append("\nВключить: /automodels on (или /automodels <acc> on)")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    value = rest[0].lower()
+    aliases = {"on": "on", "вкл": "on", "off": "off", "выкл": "off",
+               "preview": "preview", "превью": "preview", "тест": "preview"}
+    mode = aliases.get(value)
+    if mode is None:
+        await update.message.reply_text("Использование: /automodels [<acc>] on|off|preview")
+        return
+
+    for acc in targets:
+        acc.models_mode = mode
+    save_persisted(accounts)
+    who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    explain = {
+        "off": "Отбор не считается вовсе — ни одного лишнего запроса, поведение как до автоподбора.",
+        "preview": "Бот считает отбор и показывает его в /models, но modelNames НЕ трогает. "
+                   "Цикл станет заметно дольше — это цена запросов к истории.",
+        "on": "Бот будет переписывать modelNames подписок при каждом пересчёте. "
+              "Прежние ручные списки сохранятся — вернуть их можно через /restoremodels.",
+    }[mode]
+    await update.message.reply_text(f"[{who}] режим автоподбора: {mode}\n{explain}")
+
+
+async def _cmd_setnumber(update, context, field: str, cmd: str, example: str, describe):
+    """Общий разбор для команд вида '<cmd> [<acc>] <число>'."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+    if not rest:
+        await update.message.reply_text(f"Использование: {cmd} [<acc>] <число>, напр. {example}")
+        return
+    try:
+        value = float(rest[0])
+    except ValueError:
+        await update.message.reply_text(f"Значение должно быть числом, напр. {example}")
+        return
+    if value <= 0:
+        await update.message.reply_text("Значение должно быть больше нуля")
+        return
+
+    for acc in targets:
+        setattr(acc, field, int(value) if isinstance(getattr(acc, field), int) else value)
+    save_persisted(accounts)
+    who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    await update.message.reply_text(f"{describe(getattr(targets[0], field))} — для {who}.")
+
+
+async def cmd_setpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setpremium [<acc>] <%> — порог: насколько выше floor коллекции должна стоить модель."""
+    await _cmd_setnumber(
+        update, context, "premium_pct", "/setpremium", "/setpremium 50",
+        lambda v: f"В заказ идут модели, стоящие от +{v:g}% к floor коллекции и выше",
+    )
+
+
+async def cmd_setpumptol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setpumptol [<acc>] <%> — допустимое превышение текущей цены над медианой продаж."""
+    await _cmd_setnumber(
+        update, context, "tol_pct", "/setpumptol", "/setpumptol 15",
+        lambda v: f"Памп — если цена выше медианы продаж более чем на {v:g}%",
+    )
+
+
+async def cmd_setsalesdepth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setsalesdepth [<acc>] <n> — сколько последних продаж смотреть."""
+    await _cmd_setnumber(
+        update, context, "sales_depth", "/setsalesdepth", "/setsalesdepth 100",
+        lambda v: f"Смотрим последние {v} продаж модели ({-(-v // 20)} страниц истории)",
+    )
+
+
+async def cmd_setprobe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setprobe [<acc>] <лимит> [маркетов] — сколько моделей доуточнять и по скольким маркетам."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+    if not rest:
+        await update.message.reply_text(
+            "Использование: /setprobe [<acc>] <лимит> [маркетов]\n"
+            "напр. /setprobe 30 1 — доуточнять цену максимум у 30 моделей за цикл, по одному маркету.\n"
+            "Это главный расход времени цикла: маркетов 3 вместо 1 — цикл втрое дольше."
+        )
+        return
+    try:
+        limit = int(float(rest[0]))
+        markets = int(float(rest[1])) if len(rest) > 1 else None
+    except ValueError:
+        await update.message.reply_text("Аргументы должны быть числами, напр. /setprobe 30 1")
+        return
+    if limit < 1:
+        await update.message.reply_text("Лимит должен быть не меньше 1")
+        return
+    if markets is not None and not 1 <= markets <= 3:
+        await update.message.reply_text("Маркетов может быть от 1 до 3")
+        return
+
+    for acc in targets:
+        acc.probe_limit = limit
+        if markets is not None:
+            acc.probe_markets = markets
+    save_persisted(accounts)
+    acc = targets[0]
+    who = acc.name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    await update.message.reply_text(
+        f"Добор цен для {who}: до {acc.probe_limit} моделей за цикл по {acc.probe_markets} маркет(ам)."
+    )
+
+
+async def cmd_restoremodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/restoremodels [<acc>] — вернуть подпискам ручные modelNames, какими они были до автоподбора."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, _, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+
+    lines = []
+    for acc in targets:
+        if not acc.original_models:
+            lines.append(f"[{acc.name}] нечего восстанавливать — бот ещё не переписывал modelNames")
+            continue
+        if acc.models_mode == "on":
+            lines.append(
+                f"[{acc.name}] сначала выключи автоподбор: /automodels {acc.name} off — "
+                f"иначе следующий цикл снова перепишет модели"
+            )
+            continue
+        restored, failed = await asyncio.to_thread(_restore_models, acc)
+        lines.append(f"[{acc.name}] восстановлено подписок: {restored}"
+                     + (f", ошибок: {failed}" if failed else ""))
+        if restored:
+            save_persisted(accounts)
+    await update.message.reply_text("\n".join(lines))
+
+
+def _restore_models(acc):
+    """Возвращает подпискам сохранённые ручные modelNames. Синхронно — из to_thread."""
+    from updater import SUBSCRIPTION_BODY_FIELDS
+    restored = failed = 0
+    try:
+        subs = acc.client.get_subscriptions()
+    except Exception as e:
+        acc.record_error(f"get_subscriptions (/restoremodels): {e}")
+        return 0, 1
+
+    for sub in subs:
+        original = acc.original_models.get(sub["_id"])
+        if original is None:
+            continue
+        body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
+        body["modelNames"] = original
+        if not body.get("numberPattern"):
+            body.pop("numberPattern", None)
+        try:
+            acc.client.update_subscription(sub["_id"], body)
+            acc.original_models.pop(sub["_id"], None)
+            restored += 1
+        except Exception as e:
+            acc.record_error(f"[{sub.get('subscriptionName')}] restore modelNames: {e}")
+            failed += 1
+    return restored, failed
+
+
+async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/models [<acc>] — что автоподбор выбрал и что отсеял в последнем цикле."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, _, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+
+    lines = []
+    for acc in targets:
+        if not acc.last_models:
+            lines.append(
+                f"[{acc.name}] данных нет — цикл ещё не отработал или нет заказов на модели. /forceupdate"
+            )
+            continue
+        lines.append(f"[{acc.name}] режим {acc.models_mode}"
+                     + (" — показано то, что бот выбрал бы, подписки не тронуты"
+                        if acc.models_mode == "preview" else "") + ":")
+        for sub_name, rep in acc.last_models.items():
+            lines.append(
+                f"  • {sub_name}: моделей видно {rep['seen']}, порог {rep['threshold']:.2f} TON → "
+                f"кандидатов {rep['candidates']}, "
+                f"{'применено' if rep['applied'] else 'подобрано (не применено)'} {len(rep['picked'])}"
+            )
+            for model in rep["picked"][:15]:
+                d = rep["details"][model]
+                lines.append(f"    ✅ {model}: {d['floor']:.2f} TON, медиана продаж {d['median']:.2f} "
+                             f"(по {d['used']} сделкам)")
+            if len(rep["picked"]) > 15:
+                lines.append(f"    … и ещё {len(rep['picked']) - 15}")
+            for model in rep["pumped"][:10]:
+                d = rep["details"][model]
+                lines.append(f"    🚀 {model}: сейчас {d['floor']:.2f} против медианы {d['median']:.2f} — памп")
+            if rep["no_data"]:
+                lines.append(f"    ⏳ мало сделок для проверки ({len(rep['no_data'])}): "
+                             + ", ".join(rep["no_data"][:8]))
+
+    text = "\n".join(lines)
+    for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
+        await update.message.reply_text(text[i:i + 4000])
+
+
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /forceupdate         — пересчитать цены сразу для ВСЕХ аккаунтов (кроме тех, что на паузе)
@@ -299,10 +607,14 @@ async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _unknown_account_reply(update, accounts)
             return
         await update.message.reply_text(f"[{acc.name}] запускаю пересчёт...")
-        await asyncio.to_thread(run_cycle, acc)
+        ran = await asyncio.to_thread(run_cycle, acc)
+        if not ran:
+            await update.message.reply_text("Цикл уже идёт — дождись его окончания и повтори.")
+            return
         await update.message.reply_text(
             f"[{acc.name}] готово: обновлено {acc.last_updated_count}, "
-            f"пропущено {acc.last_skipped_count}, ошибок в буфере: {len(acc.errors)}"
+            f"пропущено {acc.last_skipped_count}, запросов {acc.last_requests}, "
+            f"ошибок в буфере: {len(acc.errors)}"
         )
         return
 
@@ -317,14 +629,20 @@ async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Запускаю пересчёт для {len(active)} аккаунт(ов)"
         + (f" (пропущено на паузе: {skipped_paused})" if skipped_paused else "") + "..."
     )
+    ran_any = False
     for acc in active:
-        await asyncio.to_thread(run_cycle, acc)
+        ran_any |= await asyncio.to_thread(run_cycle, acc)
+
+    if not ran_any:
+        await update.message.reply_text("Цикл уже идёт — дождись его окончания и повтори.")
+        return
 
     lines = ["✅ Готово:"]
     for acc in active:
         lines.append(
             f"[{acc.name}] обновлено {acc.last_updated_count}, "
-            f"пропущено {acc.last_skipped_count}, ошибок: {len(acc.errors)}"
+            f"пропущено {acc.last_skipped_count}, запросов {acc.last_requests}, "
+            f"ошибок: {len(acc.errors)}"
         )
     await update.message.reply_text("\n".join(lines))
 
@@ -455,6 +773,13 @@ def main():
     app.add_handler(CommandHandler("subs", cmd_subs))
     app.add_handler(CommandHandler("setmarkup", cmd_setmarkup))
     app.add_handler(CommandHandler("setmarkupfon", cmd_setmarkupfon))
+    app.add_handler(CommandHandler("automodels", cmd_automodels))
+    app.add_handler(CommandHandler("setpremium", cmd_setpremium))
+    app.add_handler(CommandHandler("setpumptol", cmd_setpumptol))
+    app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
+    app.add_handler(CommandHandler("setprobe", cmd_setprobe))
+    app.add_handler(CommandHandler("models", cmd_models))
+    app.add_handler(CommandHandler("restoremodels", cmd_restoremodels))
     app.add_handler(CommandHandler("forceupdate", cmd_forceupdate))
     app.add_handler(CommandHandler("setinterval", cmd_setinterval))
     app.add_handler(CommandHandler("pause", cmd_pause))

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+state.json
+global_state.json
+price_history.json
+.env

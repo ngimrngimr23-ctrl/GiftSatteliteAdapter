@@ -15,6 +15,7 @@ MAX_ERRORS = 30  # сколько последних ошибок хранить
 GLOBAL_STATE_FILE = "global_state.json"  # фолбэк для локальной разработки
 GLOBAL_REDIS_KEY = os.environ.get("REDIS_GLOBAL_KEY", "giftadapter:global")
 
+
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 REDIS_STATE_KEY = os.environ.get("REDIS_STATE_KEY", "giftadapter:state")
@@ -28,9 +29,24 @@ class AccountState:
     markup_pct: float = 3.0  # наценка для заказов на модели (подписки без backdropNames)
     markup_pct_fon: float = 3.0  # наценка для заказов на фоны (подписки с заданным backdropNames)
     paused: bool = False
+    # --- автоподбор моделей в заказ ---
+    # off — автоподбор не работает и не стоит ни одного запроса (поведение старого бота);
+    # preview — считает и показывает в /models, но modelNames не трогает;
+    # on — считает и применяет.
+    models_mode: str = "off"
+    premium_pct: float = 50.0  # на сколько % выше floor коллекции должна стоить модель (порог)
+    tol_pct: float = 15.0  # насколько текущая цена может превышать медиану продаж, прежде чем это памп
+    sales_depth: int = 100  # сколько последних продаж смотреть (кратно 20 — размеру страницы истории)
+    fresh_hours: float = 24.0  # свежие продажи не идут в базу сравнения
+    min_sales: int = 5  # меньше продаж в базе — проверить нечем, модель не берём
+    probe_limit: int = 30  # максимум моделей, чью цену доуточняем запросами за цикл
+    probe_markets: int = 1  # по скольким маркетам уточнять цену модели (1 быстрее, 3 точнее)
     last_run_ts: Optional[float] = None
     last_updated_count: int = 0
     last_skipped_count: int = 0
+    last_requests: int = 0  # запросов к API за последний цикл — видно реальную стоимость
+    last_models: dict = field(default_factory=dict)  # отчёт последнего цикла для /models, не персистится
+    original_models: dict = field(default_factory=dict)  # {sub_id: [модели]} до первой перезаписи ботом
     errors: deque = field(default_factory=lambda: deque(maxlen=MAX_ERRORS))
 
     def record_error(self, message: str):
@@ -38,7 +54,20 @@ class AccountState:
         log.error("[%s] %s", self.name, message)
 
     def to_persist(self):
-        return {"markup_pct": self.markup_pct, "markup_pct_fon": self.markup_pct_fon, "paused": self.paused}
+        return {
+            "markup_pct": self.markup_pct,
+            "markup_pct_fon": self.markup_pct_fon,
+            "paused": self.paused,
+            "models_mode": self.models_mode,
+            "premium_pct": self.premium_pct,
+            "tol_pct": self.tol_pct,
+            "sales_depth": self.sales_depth,
+            "fresh_hours": self.fresh_hours,
+            "min_sales": self.min_sales,
+            "probe_limit": self.probe_limit,
+            "probe_markets": self.probe_markets,
+            "original_models": self.original_models,
+        }
 
 
 def _upstash_headers():
@@ -173,4 +202,6 @@ def save_global_settings(data: dict):
         _save_to_upstash_key(GLOBAL_REDIS_KEY, data)
         return
     _save_to_file_path(GLOBAL_STATE_FILE, data)
+
+
     

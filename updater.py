@@ -1,13 +1,24 @@
 import time
 import logging
 import statistics
+import threading
 
-from api_client import ApiError
+from api_client import ApiError, HISTORY_PAGE_SIZE
+from model_picker import check_pump, pick_candidates, trim_to_limit
 
 log = logging.getLogger("updater")
 
 MARKETS = ["portals", "tonnel", "mrkt"]  # где смотрим актуальную цену
 MIN_DELTA = 0.02  # не дёргать PUT, если цена изменилась меньше чем на столько TON
+HISTORY_CACHE_HOURS = 6.0  # медиана по сотне сделок за час не меняется — не перезапрашиваем каждый цикл
+
+# Цикл с автоподбором идёт минутами, а /setinterval разрешает поставить 1 минуту,
+# поэтому запуски нужно защитить от наложения друг на друга.
+_CYCLE_LOCK = threading.Lock()
+
+# Рыночные данные не зависят от аккаунта, поэтому кеш общий на процесс:
+# {(collection, model): (ts, [продажи])}
+_HISTORY_CACHE: dict = {}
 
 # Поля, которые нужно переслать обратно в PUT /user/update-subscription/:id
 # (тело идентично POST /user/subscribe)
@@ -52,25 +63,62 @@ def _eligible(sub: dict) -> bool:
     return True
 
 
-def _current_floor(client, sub: dict, account) -> float | None:
+def _listing_model(listing: dict) -> str | None:
     """
-    Цена по коллекции в целом, взятая как медиана floor-цен среди трёх
-    маркетов (MARKETS): для каждого маркета берём его собственный floor
-    (минимальную цену листинга на этом маркете), а затем берём медиану
-    среди этих floor-цен. Медиана устойчивее к разовым ценовым выбросам
-    на одном из маркетов, чем среднее.
+    Имя модели из листинга. По докам поле называется modelName, но запасные
+    варианты оставлены: пустое имя модели тише всего ломает весь отбор.
+    """
+    for key in ("model", "modelName", "model_name"):
+        value = listing.get(key)
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("value")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _model_floors_of_market(listings: list) -> dict:
+    """Минимальная цена листинга в разрезе моделей, в пределах одного маркета."""
+    floors = {}
+    for listing in listings:
+        model = _listing_model(listing)
+        price = listing.get("normalizedPrice")
+        if model is None or price is None:
+            continue
+        if model not in floors or price < floors[model]:
+            floors[model] = price
+    return floors
+
+
+def _scan_collection(client, sub: dict, account) -> tuple[float | None, dict]:
+    """
+    Один проход по маркетам, из которого получаем сразу две вещи:
+
+    1. floor коллекции — медиана floor-цен среди трёх маркетов (MARKETS): для
+       каждого маркета берём его собственный floor (минимальную цену листинга
+       на этом маркете), а затем медиану среди этих floor-цен. Медиана
+       устойчивее к разовым ценовым выбросам на одном из маркетов, чем среднее.
+    2. floor каждой модели — те же листинги, сгруппированные по модели, и так
+       же сведённые медианой по маркетам. Дополнительных запросов к API это не
+       стоит, поэтому автоподбор моделей не увеличивает нагрузку на rate limit.
 
     ВАЖНО: modelNames и numberPattern подписки здесь намеренно
     игнорируются — floor считается по всей коллекции без каких-либо
     фильтров подписки, чтобы автобай ставил цену на самый дешёвый
     подарок в коллекции целиком, а не на дешёвый подарок среди узкой
     подвыборки (конкретных моделей или конкретной длины номера).
+
+    Оговорка про модели: поиск отдаёт максимум 50 листингов, отсортированных по
+    цене, поэтому здесь видны только модели у дешёвого края. Дорогие модели —
+    а при отборе по премии над floor интересны именно они — доуточняются
+    отдельно в _probe_model_floors.
     """
     collection = sub["collectionName"]
     sub_name = sub.get("subscriptionName", sub["_id"])
     backdrops = sub.get("backdropNames") or None
 
     market_floors = []
+    per_market_models = []
     for market in MARKETS:
         try:
             listings = client.search_market(
@@ -81,53 +129,158 @@ def _current_floor(client, sub: dict, account) -> float | None:
             continue
         if listings:
             market_floors.append(listings[0]["normalizedPrice"])  # самый дешёвый листинг на этом маркете
+            per_market_models.append(_model_floors_of_market(listings))
 
     if not market_floors:
-        return None
-    return statistics.median(market_floors)
+        return None, {}
+
+    model_floors = {}
+    for model in set().union(*per_market_models) if per_market_models else set():
+        prices = [floors[model] for floors in per_market_models if model in floors]
+        model_floors[model] = statistics.median(prices)
+
+    return statistics.median(market_floors), model_floors
 
 
-def check_purchases(account) -> list[dict]:
+def _probe_model_floors(client, collection: str, known: dict, account) -> dict:
     """
-    Проверяет GET /user/purchases и возвращает новые (ещё не виденные) покупки
-    в хронологическом порядке (сначала старые). Обновляет account.last_purchase_ts,
-    но не сохраняет состояние — save_persisted должен вызвать вызывающий код.
+    Доуточняет цены моделей, не попавших в дешёвую выдачу поиска.
 
-    На самом первом запуске (last_purchase_ts ещё не задан) ничего не возвращает —
-    просто запоминает текущую последнюю покупку, чтобы не спамить всей историей.
+    Полный список моделей даёт GET /gift/models/:collection, а цену каждой —
+    точечный поиск с фильтром по одной модели (первый листинг = её floor).
+    Именно этот шаг стоит основных запросов за цикл, поэтому ограничен
+    probe_limit, а число маркетов задаётся probe_markets (по одному быстрее
+    втрое, а на сравнение с порогом и с историей точность третьего знака
+    всё равно не влияет).
     """
     try:
-        data = account.client.get_purchases(page=0)
+        catalog = client.get_models(collection)
     except ApiError as e:
-        account.record_error(f"get_purchases: {e}")
-        return []
+        account.record_error(f"get_models {collection}: {e}")
+        return {}
 
-    purchases = (data or {}).get("purchases", [])
-    if not purchases:
-        return []
+    names = []
+    for item in catalog or []:
+        name = item.get("name") if isinstance(item, dict) else item
+        if isinstance(name, str) and name.strip() and name.strip() not in known:
+            names.append(name.strip())
 
-    # сортируем сами — сортировка ответа сервером явно не гарантирована в доках
-    purchases = sorted(purchases, key=lambda p: p.get("timestamp", ""), reverse=True)
+    if len(names) > account.probe_limit:
+        log.info("[%s] моделей для добора %d, беру %d (probe_limit)",
+                 collection, len(names), account.probe_limit)
+        names = names[:account.probe_limit]
 
-    if account.last_purchase_ts is None:
-        account.last_purchase_ts = purchases[0].get("timestamp")
-        return []
+    markets = MARKETS[:max(1, account.probe_markets)]
+    floors = {}
+    for name in names:
+        prices = []
+        for market in markets:
+            try:
+                listings = client.search_market(market, collection, models=[name])
+            except ApiError as e:
+                account.record_error(f"probe {market}/{collection}/{name}: {e}")
+                continue
+            if listings:
+                prices.append(listings[0]["normalizedPrice"])
+        if prices:
+            floors[name] = statistics.median(prices)
+    return floors
 
-    new_ones = [p for p in purchases if p.get("timestamp", "") > account.last_purchase_ts]
-    if not new_ones:
-        return []
 
-    account.last_purchase_ts = purchases[0].get("timestamp")
-    return list(reversed(new_ones))  # старые сначала
+def _fetch_sales(client, collection: str, model: str, depth: int, account, now: float) -> list:
+    """
+    Последние `depth` продаж модели. pageSize у истории жёстко ограничен 20,
+    поэтому глубина набирается страницами, с ранней остановкой по totalPages,
+    когда продаж меньше запрошенного.
+
+    Результат кешируется на HISTORY_CACHE_HOURS: медиана по сотне сделок за час
+    практически не меняется, а перезапрос стоил бы по 5 запросов на модель
+    каждый цикл.
+    """
+    cached = _HISTORY_CACHE.get((collection, model))
+    if cached and now - cached[0] < HISTORY_CACHE_HOURS * 3600:
+        return cached[1]
+
+    sales = []
+    pages = max(1, -(-depth // HISTORY_PAGE_SIZE))  # ceil
+    for page in range(pages):
+        try:
+            data = client.get_history(collection, models=[model], sort_by="date", page=page)
+        except ApiError as e:
+            account.record_error(f"history {collection}/{model} p{page}: {e}")
+            break
+        content = (data or {}).get("content") or []
+        sales.extend(content)
+        total_pages = ((data or {}).get("page") or {}).get("totalPages")
+        if not content or (total_pages is not None and page + 1 >= total_pages):
+            break
+
+    sales = sales[:depth]
+    _HISTORY_CACHE[(collection, model)] = (now, sales)
+    return sales
 
 
-def run_cycle(account):
-    """account: state.AccountState. Синхронная функция — вызывать через asyncio.to_thread из бота."""
-    account.last_run_ts = time.time()
+def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float) -> dict:
+    """
+    Полный отбор моделей для одной подписки: порог по премии, затем проверка
+    каждой уцелевшей модели по истории продаж. Возвращает отчёт для /models.
+    """
+    collection = sub["collectionName"]
+    probed = _probe_model_floors(client, collection, model_floors, account)
+    all_floors = dict(model_floors)
+    all_floors.update(probed)
+
+    candidates = pick_candidates(all_floors, floor, account.premium_pct)
+
+    picked, pumped, no_data = [], [], []
+    details = {}
+    for model in candidates:
+        sales = _fetch_sales(client, collection, model, account.sales_depth, account, now)
+        result = check_pump(sales, all_floors[model], account.tol_pct,
+                            account.min_sales, account.fresh_hours, now)
+        details[model] = {"floor": all_floors[model], **result}
+        if result["verdict"] == "ok":
+            picked.append(model)
+        elif result["verdict"] == "pump":
+            pumped.append(model)
+        else:
+            no_data.append(model)
+
+    return {
+        "picked": trim_to_limit(picked),
+        "pumped": pumped,
+        "no_data": no_data,
+        "seen": len(all_floors),
+        "candidates": len(candidates),
+        "threshold": floor * (1 + account.premium_pct / 100),
+        "details": details,
+    }
+
+
+def run_cycle(account) -> bool:
+    """
+    account: state.AccountState. Синхронная функция — вызывать через asyncio.to_thread из бота.
+    Возвращает False, если цикл пропущен, потому что предыдущий ещё не закончился.
+    """
+    if not _CYCLE_LOCK.acquire(blocking=False):
+        log.warning("[%s] предыдущий цикл ещё идёт — пропускаю запуск", account.name)
+        return False
+    try:
+        _run_cycle_locked(account)
+    finally:
+        _CYCLE_LOCK.release()
+    return True
+
+
+def _run_cycle_locked(account):
+    now = time.time()
+    account.last_run_ts = now
     account.errors.clear()  # буфер /errors отражает только текущий цикл, а не всю историю
+    account.last_models = {}
     updated = 0
     skipped = 0
     client = account.client
+    client.request_count = 0
     markup_mult_model = 1 + account.markup_pct / 100
     markup_mult_fon = 1 + account.markup_pct_fon / 100
 
@@ -137,6 +290,7 @@ def run_cycle(account):
         account.record_error(f"get_subscriptions: {e}")
         account.last_updated_count = 0
         account.last_skipped_count = 0
+        account.last_requests = client.request_count
         return
 
     for sub in subs:
@@ -144,7 +298,7 @@ def run_cycle(account):
             continue
 
         name = sub.get("subscriptionName", sub["_id"])
-        floor = _current_floor(client, sub, account)
+        floor, model_floors = _scan_collection(client, sub, account)
         if floor is None:
             log.info("[%s/%s] нет активных листингов под фильтр — пропуск", account.name, name)
             skipped += 1
@@ -154,14 +308,37 @@ def run_cycle(account):
         markup_mult = markup_mult_fon if is_fon else markup_mult_model
         markup_pct = account.markup_pct_fon if is_fon else account.markup_pct
 
+        new_models = None
+        # Заказы на фоны не трогаем: у них листинги отфильтрованы по backdropNames,
+        # и floor-цены моделей несопоставимы с ценами коллекции без фильтра.
+        # При models_mode == "off" отбор не считается вовсе — ни одного лишнего запроса.
+        if not is_fon and account.models_mode != "off":
+            report = _select_models(client, sub, floor, model_floors, account, now)
+            report["applied"] = bool(report["picked"]) and account.models_mode == "on"
+            account.last_models[name] = report
+            if account.models_mode == "on":
+                if report["picked"]:
+                    new_models = report["picked"]
+                    # запоминаем ручной список до первой перезаписи — вернуть его
+                    # иначе будет неоткуда (/restoremodels)
+                    account.original_models.setdefault(sub["_id"], sub.get("modelNames") or [])
+                else:
+                    # пустой modelNames означает ВСЕ модели коллекции (см. доки),
+                    # поэтому при пустом отборе набор моделей оставляем как есть
+                    log.warning("[%s/%s] автоподбор не дал ни одной модели — modelNames не трогаем",
+                                account.name, name)
+
         new_price = round(floor * markup_mult, 2)
         old_price = sub.get("portalsAutobuyMaxPrice")
-        if old_price is not None and abs(new_price - old_price) < MIN_DELTA:
+        models_changed = new_models is not None and sorted(new_models) != sorted(sub.get("modelNames") or [])
+        if old_price is not None and abs(new_price - old_price) < MIN_DELTA and not models_changed:
             skipped += 1
             continue
 
         body = {f: sub.get(f) for f in SUBSCRIPTION_BODY_FIELDS}
         body["portalsAutobuyMaxPrice"] = new_price
+        if new_models is not None:
+            body["modelNames"] = new_models
         # numberPattern: сервер валидирует regex ^[A-Za-z0-9]+$ — пустая
         # строка/null его не проходят, поэтому при отсутствии паттерна
         # поле нужно не отправлять вовсе, а не слать "" или null.
@@ -171,11 +348,15 @@ def run_cycle(account):
         try:
             client.update_subscription(sub["_id"], body)
             updated += 1
-            log.info("[%s/%s] обновлено (%s): %s -> %s TON (floor %.2f, +%.1f%%)",
-                      account.name, name, "фон" if is_fon else "модель", old_price, new_price, floor, markup_pct)
+            log.info("[%s/%s] обновлено (%s): %s -> %s TON (floor %.2f, +%.1f%%)%s",
+                      account.name, name, "фон" if is_fon else "модель", old_price, new_price, floor, markup_pct,
+                      f", моделей: {len(new_models)}" if new_models is not None else "")
         except ApiError as e:
             account.record_error(f"[{name}] update_subscription: {e}")
 
     account.last_updated_count = updated
     account.last_skipped_count = skipped
+    account.last_requests = client.request_count
+    log.info("[%s] цикл завершён: обновлено %d, пропущено %d, запросов к API %d, заняло %.0f сек",
+             account.name, updated, skipped, client.request_count, time.time() - now)
 
