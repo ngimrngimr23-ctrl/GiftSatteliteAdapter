@@ -1,101 +1,85 @@
 """
-Автоподбор моделей для заказа + отсев моделей, которые недавно пампанулись.
+Отбор моделей в заказ: премия над floor коллекции + проверка премии по реальной
+истории продаж (POST /history/:collection).
 
-У API нет истории цен, поэтому историю бот копит сам: каждый цикл на каждую
-модель коллекции пишется снапшот [timestamp, floor]. Памп определяется как
-превышение текущего floor над медианой снапшотов за окно (pump_window_h).
+Стратегия. Цена в подписке одна и считается по floor ВСЕЙ коллекции, поэтому
+сработавший ордер на модель, которая сама стоит заметно дороже floor, — это
+покупка сильно ниже её собственного рынка. Значит:
+
+1. Кандидат — модель, чей текущий floor не ниже floor коллекции с премией
+   premium_pct (порог, а не полоса: чем дороже модель, тем выгоднее).
+2. Премия должна быть настоящей, а не нарисованной пампом: медиана цен по
+   истории продаж модели должна быть не сильно ниже её текущей цены.
+
+Проверка односторонняя: модель, торгующаяся ДЕШЕВЛЕ своей истории, — это
+просадка, а не памп, такую берём.
 """
 import logging
 import statistics
+from datetime import datetime, timezone
 
 log = logging.getLogger("model_picker")
 
-MIN_PUMP_SAMPLES = 3  # меньше — статистики не хватает, памп не считаем
-HISTORY_MAX_POINTS = 60  # сколько снапшотов на модель храним максимум
-HISTORY_TTL_HOURS = 72  # снапшоты старше — выкидываем
-MAX_OVER_FLOOR_PCT = 100.0  # модель дороже floor коллекции более чем на столько % в заказ не попадает
+MAX_MODEL_NAMES = 100  # жёсткий лимит modelNames в подписке (см. POST /user/subscribe)
 
 
-def _entry(history: dict, collection: str, model: str) -> dict:
-    """История хранится вложенно {collection: {model: {"p": [[ts, price]], "b": ban_until_ts}}}."""
-    return history.setdefault(collection, {}).setdefault(model, {"p": [], "b": 0})
+def parse_sold_at(value) -> float | None:
+    """soldAt приходит как ISO 8601 с 'Z' — переводим в unix-время."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
-def analyze_models(history, collection, model_floors, now, window_h, pump_pct, cooldown_h) -> dict:
+def pick_candidates(model_floors: dict, collection_floor: float, premium_pct: float) -> list:
     """
-    Дописывает текущие floor-цены моделей в историю и возвращает по каждой модели:
-    {"floor", "baseline", "pumped", "just_pumped", "until", "samples"}.
-
-    baseline считается ДО добавления текущей точки, иначе свежий памп сам бы
-    поднимал планку, с которой сравнивается. Пампанувшая модель помечается
-    баном до now + cooldown_h: без этого через окно медиана подтягивается к
-    новой цене, памп «рассасывается» и модель вернулась бы в заказ слишком рано.
+    Модели с премией не ниже premium_pct над floor коллекции, от дорогих к дешёвым
+    (первыми идут самые выгодные — важно при обрезке до MAX_MODEL_NAMES).
     """
-    stats = {}
-    for model, mfloor in model_floors.items():
-        entry = _entry(history, collection, model)
-        window_pts = [pt for pt in entry.get("p", []) if now - pt[0] <= window_h * 3600]
-        prices = [pt[1] for pt in window_pts]
-
-        baseline = statistics.median(prices) if len(prices) >= MIN_PUMP_SAMPLES else None
-        just_pumped = baseline is not None and baseline > 0 and mfloor > baseline * (1 + pump_pct / 100)
-        if just_pumped:
-            entry["b"] = max(entry.get("b", 0), now + cooldown_h * 3600)
-            log.info("[%s/%s] памп: floor %.2f против медианы %.2f за %.0fч — исключаем",
-                     collection, model, mfloor, baseline, window_h)
-
-        pts = entry.get("p", []) + [[now, mfloor]]
-        entry["p"] = [pt for pt in pts if now - pt[0] <= HISTORY_TTL_HOURS * 3600][-HISTORY_MAX_POINTS:]
-
-        stats[model] = {
-            "floor": mfloor,
-            "baseline": baseline,
-            "pumped": entry.get("b", 0) > now,
-            "just_pumped": just_pumped,
-            "until": entry.get("b", 0),
-            "samples": len(prices),
-        }
-    return stats
+    if not collection_floor:
+        return []
+    threshold = collection_floor * (1 + premium_pct / 100)
+    above = [(floor, model) for model, floor in model_floors.items() if floor >= threshold]
+    above.sort(reverse=True)
+    return [model for _, model in above]
 
 
-def pick_models(stats: dict, collection_floor, count: int, band_pct: float = MAX_OVER_FLOOR_PCT):
+def check_pump(sales: list, current_floor: float, tol_pct: float,
+               min_sales: int, fresh_hours: float, now: float) -> dict:
     """
-    Возвращает (picked, pumped, too_expensive):
-      picked — до count самых дешёвых моделей, не помеченных пампом;
-      pumped — отсеянные как недавно пампанувшие;
-      too_expensive — отсеянные как слишком дорогие относительно floor коллекции.
+    Настоящая ли премия модели. Возвращает
+    {"verdict": "ok"|"pump"|"no_data", "median", "used", "fresh_skipped"}.
 
-    Берём именно дешёвый конец, потому что цена в заказе одна на всю подписку и
-    считается по floor всей коллекции: модели заметно дороже этого floor всё
-    равно никогда не сработают, только засоряют фильтр подписки.
+    Из базы исключаются самые свежие продажи (моложе fresh_hours): если памп уже
+    успел набить сделок, они бы подтянули медиану к пампнутой цене и спрятали
+    его. Даты берём из soldAt, дополнительных запросов это не стоит.
     """
-    candidates = []
-    pumped = []
-    too_expensive = []
-    for model, st in stats.items():
-        if st["pumped"]:
-            pumped.append(model)
+    prices = []
+    fresh_skipped = 0
+    for sale in sales:
+        price = sale.get("normalizedPrice")
+        if price is None:
             continue
-        if collection_floor and st["floor"] > collection_floor * (1 + band_pct / 100):
-            too_expensive.append(model)
+        sold_ts = parse_sold_at(sale.get("soldAt"))
+        if sold_ts is not None and now - sold_ts < fresh_hours * 3600:
+            fresh_skipped += 1
             continue
-        candidates.append((st["floor"], model))
+        prices.append(price)
 
-    candidates.sort()
-    picked = [model for _, model in candidates[:count]]
-    return picked, pumped, too_expensive
+    if len(prices) < min_sales:
+        return {"verdict": "no_data", "median": None, "used": len(prices), "fresh_skipped": fresh_skipped}
+
+    median = statistics.median(prices)
+    # односторонне: current < median — это просадка, а не памп
+    verdict = "pump" if median > 0 and current_floor > median * (1 + tol_pct / 100) else "ok"
+    return {"verdict": verdict, "median": median, "used": len(prices), "fresh_skipped": fresh_skipped}
 
 
-def prune_history(history: dict, now: float):
-    """Выкидывает протухшие снапшоты и пустые записи, чтобы значение в Upstash не росло бесконечно."""
-    for collection in list(history):
-        models = history[collection]
-        for model in list(models):
-            entry = models[model]
-            pts = [pt for pt in entry.get("p", []) if now - pt[0] <= HISTORY_TTL_HOURS * 3600]
-            if not pts and entry.get("b", 0) <= now:
-                del models[model]
-                continue
-            entry["p"] = pts
-        if not models:
-            del history[collection]
+def trim_to_limit(models: list) -> list:
+    """modelNames в подписке — максимум 100 (пустой массив означал бы ВСЕ модели)."""
+    if len(models) <= MAX_MODEL_NAMES:
+        return models
+    log.warning("моделей %d, обрезаю до %d (лимит подписки)", len(models), MAX_MODEL_NAMES)
+    return models[:MAX_MODEL_NAMES]
