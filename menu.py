@@ -80,13 +80,19 @@ def models_report_text(acc) -> str:
         )
         for model in rep["picked"][:15]:
             d = rep["details"][model]
-            lines.append(f"  ✅ {model}: {d['floor']:.2f} TON, медиана продаж {d['median']:.2f} "
-                         f"(по {d['used']} сделкам)")
+            if d.get("inflated"):
+                # цена задрана, но медиана всё равно выше порога — модель законная
+                lines.append(f"  ✅ {model}: сейчас {d['floor']:.2f} (задрана), "
+                             f"медиана продаж {d['median']:.2f} — всё равно выше порога")
+            else:
+                lines.append(f"  ✅ {model}: {d['floor']:.2f} TON, медиана продаж {d['median']:.2f} "
+                             f"(по {d['used']} сделкам)")
         if len(rep["picked"]) > 15:
             lines.append(f"  … и ещё {len(rep['picked']) - 15}")
         for model in rep["pumped"][:10]:
             d = rep["details"][model]
-            lines.append(f"  🚀 {model}: сейчас {d['floor']:.2f} против медианы {d['median']:.2f} — памп")
+            lines.append(f"  🚀 {model}: сейчас {d['floor']:.2f}, но медиана всего {d['median']:.2f} — "
+                         f"ниже порога {rep['threshold']:.2f}, в список попала бы только из-за пампа")
         if rep["no_data"]:
             lines.append(f"  ⏳ мало сделок для проверки ({len(rep['no_data'])}): "
                          + ", ".join(rep["no_data"][:8]))
