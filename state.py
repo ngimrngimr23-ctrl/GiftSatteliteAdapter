@@ -15,6 +15,9 @@ MAX_ERRORS = 30  # сколько последних ошибок хранить
 GLOBAL_STATE_FILE = "global_state.json"  # фолбэк для локальной разработки
 GLOBAL_REDIS_KEY = os.environ.get("REDIS_GLOBAL_KEY", "giftadapter:global")
 
+HISTORY_STATE_FILE = "price_history.json"  # фолбэк для локальной разработки
+HISTORY_REDIS_KEY = os.environ.get("REDIS_HISTORY_KEY", "giftadapter:history")
+
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 REDIS_STATE_KEY = os.environ.get("REDIS_STATE_KEY", "giftadapter:state")
@@ -28,9 +31,16 @@ class AccountState:
     markup_pct: float = 3.0  # наценка для заказов на модели (подписки без backdropNames)
     markup_pct_fon: float = 3.0  # наценка для заказов на фоны (подписки с заданным backdropNames)
     paused: bool = False
+    # --- автоподбор моделей в заказ ---
+    auto_models: bool = False  # выключен по умолчанию: включение меняет modelNames живых подписок
+    model_count: int = 10  # сколько моделей включать в заказ
+    pump_pct: float = 20.0  # превышение floor модели над медианой за окно, считающееся пампом
+    pump_window_h: float = 24.0  # окно, по которому считается медиана (часы)
+    pump_cooldown_h: float = 12.0  # сколько модель не попадает в заказ после пампа (часы)
     last_run_ts: Optional[float] = None
     last_updated_count: int = 0
     last_skipped_count: int = 0
+    last_models: dict = field(default_factory=dict)  # отчёт последнего цикла для /models, не персистится
     errors: deque = field(default_factory=lambda: deque(maxlen=MAX_ERRORS))
 
     def record_error(self, message: str):
@@ -38,7 +48,16 @@ class AccountState:
         log.error("[%s] %s", self.name, message)
 
     def to_persist(self):
-        return {"markup_pct": self.markup_pct, "markup_pct_fon": self.markup_pct_fon, "paused": self.paused}
+        return {
+            "markup_pct": self.markup_pct,
+            "markup_pct_fon": self.markup_pct_fon,
+            "paused": self.paused,
+            "auto_models": self.auto_models,
+            "model_count": self.model_count,
+            "pump_pct": self.pump_pct,
+            "pump_window_h": self.pump_window_h,
+            "pump_cooldown_h": self.pump_cooldown_h,
+        }
 
 
 def _upstash_headers():
@@ -173,4 +192,21 @@ def save_global_settings(data: dict):
         _save_to_upstash_key(GLOBAL_REDIS_KEY, data)
         return
     _save_to_file_path(GLOBAL_STATE_FILE, data)
+
+
+def load_price_history() -> dict:
+    """
+    История floor-цен по моделям: {collection: {model: {"p": [[ts, price], ...], "b": ban_until_ts}}}.
+    Это рыночные данные, общие для всех аккаунтов, поэтому лежат отдельным ключом.
+    """
+    if _UPSTASH_ENABLED:
+        return _load_from_upstash_key(HISTORY_REDIS_KEY)
+    return _load_from_file_path(HISTORY_STATE_FILE)
+
+
+def save_price_history(data: dict):
+    if _UPSTASH_ENABLED:
+        _save_to_upstash_key(HISTORY_REDIS_KEY, data)
+        return
+    _save_to_file_path(HISTORY_STATE_FILE, data)
     
