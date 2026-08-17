@@ -39,8 +39,10 @@ class AccountState:
     sales_depth: int = 100  # сколько последних продаж смотреть (кратно 20 — размеру страницы истории)
     fresh_hours: float = 24.0  # свежие продажи не идут в базу сравнения
     min_sales: int = 5  # меньше продаж в базе — проверить нечем, модель не берём
-    probe_limit: int = 30  # максимум моделей, чью цену доуточняем запросами за цикл
-    probe_markets: int = 1  # по скольким маркетам уточнять цену модели (1 быстрее, 3 точнее)
+    probe_limit: int = 0  # максимум моделей, чью цену доуточняем; 0 = без ограничения
+    probe_markets: int = 3  # по скольким маркетам уточнять цену модели (3 = как считается floor коллекции)
+    models_interval_h: float = 48.0  # как часто пересматривать состав моделей (цены обновляются отдельно и чаще)
+    last_models_ts: Optional[float] = None  # когда состав моделей пересматривался в последний раз
     last_run_ts: Optional[float] = None
     last_updated_count: int = 0
     last_skipped_count: int = 0
@@ -66,6 +68,8 @@ class AccountState:
             "min_sales": self.min_sales,
             "probe_limit": self.probe_limit,
             "probe_markets": self.probe_markets,
+            "models_interval_h": self.models_interval_h,
+            "last_models_ts": self.last_models_ts,
             "original_models": self.original_models,
         }
 
