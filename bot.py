@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 import menu
@@ -784,13 +784,43 @@ def start_health_server():
     log.info("Health-check сервер слушает порт %d", port)
 
 
+# Показывается Telegram-ом во всплывающем меню по кнопке "/" в чате с ботом.
+# Порядок в списке — тот же, в котором команды идут в /help.
+BOT_COMMANDS = [
+    ("menu", "Интерактивное меню на кнопках"),
+    ("status", "Сводка по аккаунтам"),
+    ("errors", "Сводка ошибок"),
+    ("subs", "Активные автобай-подписки"),
+    ("setmarkup", "Наценка над floor для заказов на модели"),
+    ("setmarkupfon", "Наценка над floor для заказов на фоны"),
+    ("automodels", "Автоподбор моделей: on|off|preview"),
+    ("setpremium", "Порог премии модели над floor коллекции"),
+    ("setpumptol", "Допуск: насколько цена может превышать медиану продаж"),
+    ("setsalesdepth", "Сколько последних продаж смотреть (20/40/100)"),
+    ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
+    ("setmodelsinterval", "Как часто пересматривать состав моделей"),
+    ("refreshmodels", "Пересмотреть состав моделей прямо сейчас"),
+    ("models", "Что автоподбор выбрал и что отсеял"),
+    ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
+    ("forceupdate", "Пересчитать цены сейчас"),
+    ("setinterval", "Как часто (в минутах) проверяются цены"),
+    ("pause", "Остановить конкретный аккаунт"),
+    ("resume", "Возобновить конкретный аккаунт"),
+    ("help", "Список всех команд"),
+]
+
+
+async def _post_init(app: Application):
+    await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in BOT_COMMANDS])
+
+
 def main():
     start_health_server()
     accounts = build_accounts()
     global_settings = load_global_settings()
     cycle_seconds = global_settings.get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
 
-    app = Application.builder().token(TG_BOT_TOKEN).build()
+    app = Application.builder().token(TG_BOT_TOKEN).post_init(_post_init).build()
     app.bot_data["accounts"] = accounts
     app.bot_data["cycle_seconds"] = cycle_seconds
     # меню не импортирует bot.py (иначе вышел бы circular import), нужное отдаём через bot_data
