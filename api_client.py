@@ -63,6 +63,10 @@ class GiftApiClient:
         return resp.json()
 
     # --- User / subscriptions ---
+    def get_me(self):
+        """GET /user/me — профиль владельца токена. Используется для проверки токена при /addaccount."""
+        return self._request("GET", "/user/me")
+
     def get_subscriptions(self):
         return self._request("GET", "/user/subscriptions")
 

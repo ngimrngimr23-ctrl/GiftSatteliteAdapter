@@ -26,6 +26,11 @@ _UPSTASH_ENABLED = bool(UPSTASH_URL and UPSTASH_TOKEN)
 class AccountState:
     name: str
     client: object  # GiftApiClient
+    # Аккаунты из ACCOUNTS_JSON берут токен из окружения и в хранилище его не кладут.
+    # Добавленные командой /addaccount хранят токен вместе с настройками — иначе
+    # они не пережили бы перезапуск, ведь в окружении их нет.
+    api_token: Optional[str] = None
+    dynamic: bool = False
     markup_pct: float = 3.0  # наценка для заказов на модели (подписки без backdropNames)
     markup_pct_fon: float = 3.0  # наценка для заказов на фоны (подписки с заданным backdropNames)
     paused: bool = False
@@ -56,7 +61,9 @@ class AccountState:
         log.error("[%s] %s", self.name, message)
 
     def to_persist(self):
+        extra = {"api_token": self.api_token, "dynamic": True} if self.dynamic else {}
         return {
+            **extra,
             "markup_pct": self.markup_pct,
             "markup_pct_fon": self.markup_pct_fon,
             "paused": self.paused,
