@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import logging
@@ -32,32 +33,43 @@ ACCOUNTS_CFG = json.loads(os.environ["ACCOUNTS_JSON"])  # [{"name": "...", "api_
 CYCLE_JOB_NAME = "scheduled_cycle"
 
 
+def make_account(name: str, token: str, saved: dict | None = None, dynamic: bool = False) -> AccountState:
+    """Собирает аккаунт с клиентом и накатывает на него сохранённые настройки."""
+    kwargs = {}
+    if GIFT_API_BASE_URL:
+        kwargs["base_url"] = GIFT_API_BASE_URL
+    acc = AccountState(name=name, client=GiftApiClient(token, **kwargs),
+                       api_token=token if dynamic else None, dynamic=dynamic)
+    saved = saved or {}
+    acc.markup_pct = saved.get("markup_pct", acc.markup_pct)
+    acc.markup_pct_fon = saved.get("markup_pct_fon", acc.markup_pct_fon)
+    acc.paused = saved.get("paused", acc.paused)
+    acc.models_mode = saved.get("models_mode", acc.models_mode)
+    acc.premium_pct = saved.get("premium_pct", acc.premium_pct)
+    acc.tol_pct = saved.get("tol_pct", acc.tol_pct)
+    acc.sales_depth = saved.get("sales_depth", acc.sales_depth)
+    acc.fresh_hours = saved.get("fresh_hours", acc.fresh_hours)
+    acc.min_sales = saved.get("min_sales", acc.min_sales)
+    acc.probe_limit = saved.get("probe_limit", acc.probe_limit)
+    acc.probe_markets = saved.get("probe_markets", acc.probe_markets)
+    acc.models_interval_h = saved.get("models_interval_h", acc.models_interval_h)
+    acc.last_models_ts = saved.get("last_models_ts", acc.last_models_ts)
+    acc.original_models = saved.get("original_models", {})
+    return acc
+
+
 def build_accounts() -> dict:
     persisted = load_persisted()
     accounts = {}
     for cfg in ACCOUNTS_CFG:
         name = cfg["name"]
-        kwargs = {}
-        if GIFT_API_BASE_URL:
-            kwargs["base_url"] = GIFT_API_BASE_URL
-        client = GiftApiClient(cfg["api_token"], **kwargs)
-        acc = AccountState(name=name, client=client)
-        saved = persisted.get(name, {})
-        acc.markup_pct = saved.get("markup_pct", acc.markup_pct)
-        acc.markup_pct_fon = saved.get("markup_pct_fon", acc.markup_pct_fon)
-        acc.paused = saved.get("paused", acc.paused)
-        acc.models_mode = saved.get("models_mode", acc.models_mode)
-        acc.premium_pct = saved.get("premium_pct", acc.premium_pct)
-        acc.tol_pct = saved.get("tol_pct", acc.tol_pct)
-        acc.sales_depth = saved.get("sales_depth", acc.sales_depth)
-        acc.fresh_hours = saved.get("fresh_hours", acc.fresh_hours)
-        acc.min_sales = saved.get("min_sales", acc.min_sales)
-        acc.probe_limit = saved.get("probe_limit", acc.probe_limit)
-        acc.probe_markets = saved.get("probe_markets", acc.probe_markets)
-        acc.models_interval_h = saved.get("models_interval_h", acc.models_interval_h)
-        acc.last_models_ts = saved.get("last_models_ts", acc.last_models_ts)
-        acc.original_models = saved.get("original_models", {})
-        accounts[name] = acc
+        accounts[name] = make_account(name, cfg["api_token"], persisted.get(name))
+    # аккаунты, добавленные через /addaccount: их нет в ACCOUNTS_JSON, токен лежит рядом с настройками
+    for name, saved in persisted.items():
+        if name in accounts or not saved.get("api_token"):
+            continue
+        accounts[name] = make_account(name, saved["api_token"], saved, dynamic=True)
+        log.info("аккаунт %s поднят из сохранённых (добавлен командой)", name)
     return accounts
 
 
@@ -103,6 +115,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
+        "/addaccount <имя> <токен> — добавить аккаунт на ходу, без перезапуска\n"
+        "/delaccount <имя> — убрать аккаунт, добавленный командой\n"
         "\n"
         "\n"
         "Почти все команды принимают <acc> первым аргументом, чтобы применить их к одному конкретному "
@@ -482,6 +496,99 @@ async def cmd_setprobe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+async def cmd_addaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addaccount <имя> <токен> — добавить аккаунт на ходу, без перезапуска бота."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "Использование: /addaccount <имя> <токен>\n"
+            "напр. /addaccount acc5 abcdef123456\n\n"
+            "Имя — латиница, цифры, дефис или подчёркивание, до 32 символов.\n"
+            "⚠️ Сообщение с токеном я удалю сразу после добавления, но токен всё равно "
+            "проходит через серверы Telegram. Надёжнее держать аккаунты в ACCOUNTS_JSON."
+        )
+        return
+
+    name, token = context.args[0], context.args[1]
+    if not ACCOUNT_NAME_RE.match(name):
+        await update.message.reply_text(
+            "Имя должно быть из латиницы, цифр, дефиса или подчёркивания, до 32 символов "
+            "(оно используется как аргумент в других командах, поэтому без пробелов)."
+        )
+        return
+    if name in accounts:
+        await update.message.reply_text(f"Аккаунт «{name}» уже есть. Удалить: /delaccount {name}")
+        return
+
+    acc = make_account(name, token, dynamic=True)
+    try:
+        me = await asyncio.to_thread(acc.client.get_me)
+    except Exception as e:
+        await update.message.reply_text(f"Токен не подошёл — аккаунт не добавлен.\n{str(e)[:300]}")
+        return
+
+    # токен принят: убираем сообщение с ним из чата
+    deleted = True
+    try:
+        await update.message.delete()
+    except Exception:
+        deleted = False
+
+    accounts[name] = acc  # тот же объект словаря держат джоба и меню, поэтому меняем на месте
+    save_persisted(accounts)
+
+    me = me or {}
+    banned = " ⛔️ аккаунт забанен" if me.get("isBan") else ""
+    await update.effective_chat.send_message(
+        f"✅ Аккаунт «{name}» добавлен{banned}\n"
+        f"Telegram: @{me.get('username', '—')} | баланс: {me.get('tonBalance', '—')} TON | "
+        f"лимит подписок: {me.get('subscriptionLimit', '—')} | "
+        f"автобай: {'вкл' if me.get('isAutobuyEnabled') else 'выкл'}\n\n"
+        f"Настройки по умолчанию, автоподбор моделей выключен. Открыть: /menu\n"
+        + ("" if deleted else "⚠️ Не смог удалить твоё сообщение с токеном — удали вручную.")
+    )
+
+
+async def cmd_delaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delaccount <имя> — убрать аккаунт, добавленный командой."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not context.args:
+        dynamic = [a.name for a in accounts.values() if a.dynamic]
+        await update.message.reply_text(
+            "Использование: /delaccount <имя>\n"
+            + (f"Можно удалить: {', '.join(dynamic)}" if dynamic
+               else "Удалять нечего — все аккаунты заданы в ACCOUNTS_JSON.")
+        )
+        return
+
+    name = context.args[0]
+    acc = accounts.get(name)
+    if not acc:
+        await _unknown_account_reply(update, accounts)
+        return
+    if not acc.dynamic:
+        await update.message.reply_text(
+            f"«{name}» задан в ACCOUNTS_JSON — убрать его можно только оттуда, "
+            f"командой не получится. Чтобы бот его не трогал: /pause {name}"
+        )
+        return
+
+    del accounts[name]
+    save_persisted(accounts)
+    await update.message.reply_text(
+        f"Аккаунт «{name}» удалён вместе с сохранённым токеном.\n"
+        f"Подписки самого аккаунта не тронуты — бот просто перестал им заниматься."
+    )
+
+
 async def cmd_setmodelsinterval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/setmodelsinterval [<acc>] <часы> — как часто пересматривать состав моделей."""
     await _cmd_setnumber(
@@ -806,6 +913,8 @@ BOT_COMMANDS = [
     ("setinterval", "Как часто (в минутах) проверяются цены"),
     ("pause", "Остановить конкретный аккаунт"),
     ("resume", "Возобновить конкретный аккаунт"),
+    ("addaccount", "Добавить аккаунт: /addaccount <имя> <токен>"),
+    ("delaccount", "Удалить добавленный командой аккаунт"),
     ("help", "Список всех команд"),
 ]
 
@@ -848,6 +957,8 @@ def main():
     app.add_handler(CommandHandler("setinterval", cmd_setinterval))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("addaccount", cmd_addaccount))
+    app.add_handler(CommandHandler("delaccount", cmd_delaccount))
 
     app.job_queue.run_repeating(
         scheduled_cycle,
