@@ -284,7 +284,10 @@ async def _cmd_setmarkup_generic(update: Update, context: ContextTypes.DEFAULT_T
         for acc in accounts.values():
             setattr(acc, attr_name, pct)
         save_persisted(accounts)
-        await update.message.reply_text(f"Наценка ({label}) +{pct}% установлена для всех аккаунтов ({len(accounts)})")
+        await update.message.reply_text(
+            f"Наценка ({label}) +{pct}% установлена для всех аккаунтов ({len(accounts)}): "
+            + ", ".join(accounts)
+        )
         return
 
     # два и более аргумента = <acc> <%>, применяется к одному аккаунту
@@ -613,20 +616,23 @@ async def cmd_refreshmodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     off = [acc.name for acc in targets if acc.models_mode == "off"]
-    if len(off) == len(targets):
+    work = [acc for acc in targets if acc.models_mode != "off"]
+    if not work:
         await update.message.reply_text(
             "Автоподбор выключен у всех выбранных аккаунтов. "
             "Включи режим: /automodels preview (посчитать и показать) или /automodels on (применять)."
         )
         return
 
+    # про пропущенные говорим сразу: молчаливый пропуск выглядит так, будто бот
+    # оборвался на середине списка
     await update.message.reply_text(
-        f"Запускаю полный пересмотр моделей для {len(targets)} аккаунт(ов). "
-        f"Это надолго — перебираются все модели всех коллекций. Отчёт пришлю по готовности."
+        f"Запускаю полный пересмотр моделей: {', '.join(a.name for a in work)}.\n"
+        + (f"⚠️ Пропускаю (автоподбор выключен): {', '.join(off)}\n"
+           f"Включить: /automodels <acc> preview — или on, чтобы сразу применял.\n" if off else "")
+        + "Это надолго — перебираются все модели всех коллекций. Отчёт пришлю по готовности."
     )
-    for acc in targets:
-        if acc.models_mode == "off":
-            continue
+    for acc in work:
         ran = await asyncio.to_thread(run_cycle, acc, True)
         if not ran:
             await update.message.reply_text(f"[{acc.name}] цикл уже идёт — повтори позже.")
