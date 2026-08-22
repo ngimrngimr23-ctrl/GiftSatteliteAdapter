@@ -205,7 +205,7 @@ async def cmd_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"⚠️ Ошибки [{acc.name}] (последние {len(acc.errors)}):"]
     for ts, msg in acc.errors:
         t = datetime.fromtimestamp(ts).strftime("%d.%m %H:%M:%S")
-        lines.append(f"[{t}] {msg[:200]}")
+        lines.append(f"[{t}] {msg[:500]}")
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
         await update.message.reply_text(text[i:i + 4000])
