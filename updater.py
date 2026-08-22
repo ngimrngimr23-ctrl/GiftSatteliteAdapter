@@ -316,7 +316,13 @@ def _push_subscription(client, sub: dict, account, new_price: float, new_models=
         client.update_subscription(sub["_id"], body)
         return True
     except ApiError as e:
-        account.record_error(f"[{sub.get('subscriptionName', sub['_id'])}] update_subscription: {e}")
+        # при ошибке именно из-за modelNames показываем сами модели — иначе
+        # причину пришлось бы гадать вслепую, не видя, что было отправлено
+        extra = ""
+        if new_models is not None and "модел" in str(e).lower():
+            preview = ", ".join(new_models[:15]) + (f" … ещё {len(new_models) - 15}" if len(new_models) > 15 else "")
+            extra = f" | отправлено моделей: {len(new_models)}: {preview}"
+        account.record_error(f"[{sub.get('subscriptionName', sub['_id'])}] update_subscription: {e}{extra}")
         return False
 
 
