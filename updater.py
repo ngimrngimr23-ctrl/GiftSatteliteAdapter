@@ -4,7 +4,7 @@ import statistics
 import threading
 
 from api_client import ApiError, HISTORY_PAGE_SIZE
-from model_picker import check_pump, pick_candidates, trim_to_limit
+from model_picker import check_pump, has_suspect_chars, pick_candidates, trim_to_limit
 
 log = logging.getLogger("updater")
 
@@ -242,8 +242,15 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     all_floors = dict(model_floors)
     all_floors.update(probed)
 
-    candidates = pick_candidates(all_floors, floor, account.premium_pct)
+    all_candidates = pick_candidates(all_floors, floor, account.premium_pct)
     threshold = floor * (1 + account.premium_pct / 100)
+
+    # Модели с подозрительными символами в имени отсеиваем ДО запроса истории:
+    # сервер один раз уже отклонял весь modelNames целиком из-за одной такой
+    # модели ("Fool's Gold" при отправке отклонила все 7 моделей разом), а раз
+    # мы её всё равно не отправим — нет смысла тратить на неё запрос к истории.
+    candidates = [m for m in all_candidates if not has_suspect_chars(m)]
+    bad_format = [m for m in all_candidates if has_suspect_chars(m)]
 
     picked, pumped, no_data = [], [], []
     details = {}
@@ -263,6 +270,7 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
         "picked": trim_to_limit(picked),
         "pumped": pumped,
         "no_data": no_data,
+        "bad_format": bad_format,
         "seen": len(all_floors),
         "candidates": len(candidates),
         "threshold": threshold,

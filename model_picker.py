@@ -22,6 +22,17 @@ log = logging.getLogger("model_picker")
 
 MAX_MODEL_NAMES = 100  # жёсткий лимит modelNames в подписке (см. POST /user/subscribe)
 
+# Живой случай: сервис отдал в каталоге модель "Fool's Gold" (с апострофом), но
+# его же валидатор на PUT /update-subscription отклонил ВЕСЬ modelNames с 400
+# "Неверный формат моделей" — рассинхрон между каталогом и валидатором на их
+# стороне. Раз проверка идёт по всему списку разом, одна такая модель обрушивает
+# все остальные, поэтому подозрительные имена отсеиваем до отправки.
+SUSPECT_CHARS = set("'\"’‘“”★☆%/\\#@!$^&*+=<>{}[]|~`")
+
+
+def has_suspect_chars(name: str) -> bool:
+    return any(ch in SUSPECT_CHARS for ch in name)
+
 
 def parse_sold_at(value) -> float | None:
     """soldAt приходит как ISO 8601 с 'Z' — переводим в unix-время."""
