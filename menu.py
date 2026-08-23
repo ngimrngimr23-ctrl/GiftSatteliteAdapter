@@ -96,6 +96,9 @@ def models_report_text(acc) -> str:
         if rep["no_data"]:
             lines.append(f"  ⏳ мало сделок для проверки ({len(rep['no_data'])}): "
                          + ", ".join(rep["no_data"][:8]))
+        if rep.get("bad_format"):
+            lines.append(f"  ⛔ сервис отклоняет имя (символы вроде ' в названии), "
+                         f"пропущены ({len(rep['bad_format'])}): " + ", ".join(rep["bad_format"][:8]))
     return "\n".join(lines)
 
 
