@@ -122,7 +122,7 @@ def _rules_lines(acc) -> list:
         f"• Проверяю по {acc.sales_depth} последним продажам: свежие {acc.fresh_hours:g}ч "
         f"не в счёт, нужно от {acc.min_sales} сделок",
         f"• Отсеиваю как памп, только если без него модель не прошла бы порог",
-        f"• Цена заказа: floor +{acc.markup_pct:g}% (фоны +{acc.markup_pct_fon:g}%)",
+        f"• Цена заказа: floor {acc.markup_pct:+g}% (фоны {acc.markup_pct_fon:+g}%)",
         f"• Пересматриваю состав раз в {acc.models_interval_h:g}ч, цены — каждый цикл",
     ]
 
