@@ -607,10 +607,8 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _unknown_account_reply(update, accounts)
         return
 
-    for acc in targets:
-        text = menu.filters_text(acc)
-        for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
-            await update.message.reply_text(text[i:i + 4000])
+    # одно сообщение на все аккаунты: правила у них обычно одинаковые
+    await update.message.reply_text(menu.filters_text(targets)[:4000])
 
 
 async def cmd_setmodelsinterval(update: Update, context: ContextTypes.DEFAULT_TYPE):
