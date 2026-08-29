@@ -46,6 +46,16 @@ def _acc_by_index(context, idx):
     return accounts[idx] if 0 <= idx < len(accounts) else None
 
 
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Русские склонения: 1 модель, 2 модели, 5 моделей."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
 def fmt_ago(ts) -> str:
     if not ts:
         return "ещё не запускался"
@@ -99,6 +109,85 @@ def models_report_text(acc) -> str:
         if rep.get("bad_format"):
             lines.append(f"  ⛔ сервис отклоняет имя (символы вроде ' в названии), "
                          f"пропущены ({len(rep['bad_format'])}): " + ", ".join(rep["bad_format"][:8]))
+    return "\n".join(lines)
+
+
+def filters_text(acc) -> str:
+    """
+    Человеческое объяснение текущих настроек отбора: что каждая означает на
+    практике и к чему приводит, с примером на числах самого аккаунта.
+    """
+    mode = {
+        "off": "❌ выключен — бот не подбирает модели и не трогает заказы",
+        "preview": "👁 только показывает — считает отбор, но заказы не меняет",
+        "on": "✅ применяет — бот сам переписывает модели в заказах",
+    }[acc.models_mode]
+
+    # пример считаем от настоящего floor из последнего пересмотра, если он был
+    example_floor = None
+    if acc.last_models:
+        first = next(iter(acc.last_models.values()))
+        example_floor = first["threshold"] / (1 + acc.premium_pct / 100)
+    floor = example_floor or 20.0
+    threshold = floor * (1 + acc.premium_pct / 100)
+    order_price = floor * (1 + acc.markup_pct / 100)
+    example_note = "" if example_floor else " (для примера взял floor 20 TON)"
+
+    lines = [
+        f"🔎 Как сейчас настроен отбор — {acc.name}",
+        f"Режим: {mode}",
+        "",
+        "1. КАКИЕ МОДЕЛИ БОТ ИЩЕТ",
+        f"Он смотрит на floor коллекции — цену самого дешёвого подарка в ней — и берёт "
+        f"только те модели, которые стоят минимум на {acc.premium_pct:g}% дороже.",
+        f"На твоих числах{example_note}: floor {floor:.2f} TON → в отбор идут модели "
+        f"от {threshold:.2f} TON и выше.",
+        "Чем дороже модель, тем лучше: заказ платит цену уровня floor, а достаётся "
+        "тебе модель, которая стоит заметно больше.",
+        "",
+        "2. КАК ОН ПРОВЕРЯЕТ, ЧТО ЦЕНА НАСТОЯЩАЯ",
+        f"По каждой отобранной модели бот смотрит {acc.sales_depth} последних продаж и берёт "
+        f"медиану — цену, по которой она реально уходит.",
+        f"Сделки за последние {acc.fresh_hours:g}ч в расчёт не идут: иначе свежий памп "
+        f"оправдывал бы сам себя.",
+        f"Если продаж меньше {acc.min_sales}, проверять нечем — модель не берётся.",
+        f"Модель отсеивается как памп ТОЛЬКО если её медиана ниже порога "
+        f"({threshold:.2f} TON), то есть без задранной цены она бы и не прошла.",
+        f"Если медиана порог проходит — модель берётся, даже когда прямо сейчас её "
+        f"выставили втрое дороже обычного: платишь-то ты цену заказа.",
+        f"(допуск {acc.tol_pct:g}% — насколько цена может быть выше медианы, прежде чем "
+        f"бот вообще считает это пампом)",
+        "",
+        "3. ПО КАКОЙ ЦЕНЕ СТАВИТСЯ ЗАКАЗ",
+        f"Наценка над floor: модели +{acc.markup_pct:g}%, фоны +{acc.markup_pct_fon:g}%.",
+        f"На примере выше: floor {floor:.2f} → в заказ уйдёт {order_price:.2f} TON.",
+        "Цена считается по floor всей коллекции, а не по выбранным моделям — так и было "
+        "задумано.",
+        "",
+        "4. КАК ЧАСТО ЭТО ПРОИСХОДИТ",
+        "Цены в заказах обновляются каждый цикл — это быстро.",
+        f"Состав моделей пересматривается раз в {acc.models_interval_h:g}ч "
+        f"(последний раз — {fmt_ago(acc.last_models_ts)}), потому что перебор всех "
+        f"моделей долгий. Запустить вручную: /refreshmodels {acc.name}",
+        f"Цены моделей уточняются: "
+        f"{'все модели коллекции' if not acc.probe_limit else f'максимум {acc.probe_limit} моделей'}, "
+        f"по {acc.probe_markets} из 3 "
+        f"{plural(acc.probe_markets, 'маркета', 'маркетов', 'маркетов')}.",
+        "",
+        "5. ЧТО БОТ ПРОПУСКАЕТ ВСЕГДА",
+        "• заказы на фоны (где задан backdropNames) — там модели не трогаются",
+        "• модели с апострофом и подобными символами в названии — сервис отклоняет "
+        "такой список целиком",
+        "• если после всех фильтров не осталось ни одной модели, заказ остаётся как был "
+        "(пустой список означал бы «все модели подряд»)",
+    ]
+    if acc.models_mode != "off" and acc.last_models:
+        picked = sum(len(r["picked"]) for r in acc.last_models.values())
+        orders = len(acc.last_models)
+        lines += ["", f"В последний раз отобрано {picked} "
+                      f"{plural(picked, 'модель', 'модели', 'моделей')} "
+                      f"по {orders} {plural(orders, 'заказу', 'заказам', 'заказам')}. "
+                      f"Подробно: /models {acc.name}"]
     return "\n".join(lines)
 
 
@@ -174,6 +263,7 @@ def _account_kb(idx, acc) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🤖 Автоподбор", callback_data=_cb("auto", idx)),
             InlineKeyboardButton("📈 Отчёт моделей", callback_data=_cb("report", idx)),
         ],
+        [InlineKeyboardButton("🔎 Что сейчас настроено", callback_data=_cb("filters", idx))],
         [
             InlineKeyboardButton("💰 Наценки", callback_data=_cb("markup", idx)),
             InlineKeyboardButton("⚙️ Параметры отбора", callback_data=_cb("params", idx)),
@@ -409,6 +499,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "report":
         await _show(query, models_report_text(acc)[:4000], _back_kb(idx))
+        return
+
+    if action == "filters":
+        await _show(query, filters_text(acc)[:4000], _back_kb(idx))
         return
 
     if action == "params":

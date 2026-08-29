@@ -110,6 +110,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за проход (0 = все) и по скольким маркетам\n"
         "/setmodelsinterval <часы> — как часто пересматривать состав моделей (цены обновляются отдельно и чаще)\n"
         "/refreshmodels — пересмотреть состав моделей прямо сейчас (долго)\n"
+        "/filters — понятным языком объяснить, как сейчас настроен отбор\n"
         "/models — что автоподбор выбрал и что отсеял в последний пересмотр\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -592,6 +593,26 @@ async def cmd_delaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/filters [<acc>] — человеческим языком объяснить, как сейчас настроен отбор."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, _, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+
+    for acc in targets:
+        text = menu.filters_text(acc)
+        for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
+            await update.message.reply_text(text[i:i + 4000])
+
+
 async def cmd_setmodelsinterval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/setmodelsinterval [<acc>] <часы> — как часто пересматривать состав моделей."""
     await _cmd_setnumber(
@@ -913,6 +934,7 @@ BOT_COMMANDS = [
     ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
     ("setmodelsinterval", "Как часто пересматривать состав моделей"),
     ("refreshmodels", "Пересмотреть состав моделей прямо сейчас"),
+    ("filters", "Понятным языком: как сейчас настроен отбор"),
     ("models", "Что автоподбор выбрал и что отсеял"),
     ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -957,6 +979,7 @@ def main():
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))
     app.add_handler(CommandHandler("refreshmodels", cmd_refreshmodels))
+    app.add_handler(CommandHandler("filters", cmd_filters))
     app.add_handler(CommandHandler("models", cmd_models))
     app.add_handler(CommandHandler("restoremodels", cmd_restoremodels))
     app.add_handler(CommandHandler("forceupdate", cmd_forceupdate))
