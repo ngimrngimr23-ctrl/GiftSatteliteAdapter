@@ -13,7 +13,8 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 import menu
 from api_client import GiftApiClient
-from state import AccountState, load_persisted, save_persisted, load_global_settings, save_global_settings
+from state import (AccountState, load_persisted, save_persisted, load_global_settings,
+                   save_global_settings, storage_status)
 from updater import run_cycle
 
 load_dotenv()
@@ -163,6 +164,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{status_icon} {acc.name}: обновлено {acc.last_updated_count} | "
             f"{fmt_ago(acc.last_run_ts)} | {err_icon}"
         )
+    lines.append(f"\nХранилище настроек: {storage_status()}")
     await update.message.reply_text("\n".join(lines))
 
 
