@@ -112,82 +112,53 @@ def models_report_text(acc) -> str:
     return "\n".join(lines)
 
 
-def filters_text(acc) -> str:
-    """
-    Человеческое объяснение текущих настроек отбора: что каждая означает на
-    практике и к чему приводит, с примером на числах самого аккаунта.
-    """
-    mode = {
-        "off": "❌ выключен — бот не подбирает модели и не трогает заказы",
-        "preview": "👁 только показывает — считает отбор, но заказы не меняет",
-        "on": "✅ применяет — бот сам переписывает модели в заказах",
-    }[acc.models_mode]
+MODE_SHORT = {"off": "❌ выкл", "preview": "👁 показывает", "on": "✅ применяет"}
 
-    # пример считаем от настоящего floor из последнего пересмотра, если он был
-    example_floor = None
-    if acc.last_models:
-        first = next(iter(acc.last_models.values()))
-        example_floor = first["threshold"] / (1 + acc.premium_pct / 100)
-    floor = example_floor or 20.0
-    threshold = floor * (1 + acc.premium_pct / 100)
-    order_price = floor * (1 + acc.markup_pct / 100)
-    example_note = "" if example_floor else " (для примера взял floor 20 TON)"
 
-    lines = [
-        f"🔎 Как сейчас настроен отбор — {acc.name}",
-        f"Режим: {mode}",
-        "",
-        "1. КАКИЕ МОДЕЛИ БОТ ИЩЕТ",
-        f"Он смотрит на floor коллекции — цену самого дешёвого подарка в ней — и берёт "
-        f"только те модели, которые стоят минимум на {acc.premium_pct:g}% дороже.",
-        f"На твоих числах{example_note}: floor {floor:.2f} TON → в отбор идут модели "
-        f"от {threshold:.2f} TON и выше.",
-        "Чем дороже модель, тем лучше: заказ платит цену уровня floor, а достаётся "
-        "тебе модель, которая стоит заметно больше.",
-        "",
-        "2. КАК ОН ПРОВЕРЯЕТ, ЧТО ЦЕНА НАСТОЯЩАЯ",
-        f"По каждой отобранной модели бот смотрит {acc.sales_depth} последних продаж и берёт "
-        f"медиану — цену, по которой она реально уходит.",
-        f"Сделки за последние {acc.fresh_hours:g}ч в расчёт не идут: иначе свежий памп "
-        f"оправдывал бы сам себя.",
-        f"Если продаж меньше {acc.min_sales}, проверять нечем — модель не берётся.",
-        f"Модель отсеивается как памп ТОЛЬКО если её медиана ниже порога "
-        f"({threshold:.2f} TON), то есть без задранной цены она бы и не прошла.",
-        f"Если медиана порог проходит — модель берётся, даже когда прямо сейчас её "
-        f"выставили втрое дороже обычного: платишь-то ты цену заказа.",
-        f"(допуск {acc.tol_pct:g}% — насколько цена может быть выше медианы, прежде чем "
-        f"бот вообще считает это пампом)",
-        "",
-        "3. ПО КАКОЙ ЦЕНЕ СТАВИТСЯ ЗАКАЗ",
-        f"Наценка над floor: модели +{acc.markup_pct:g}%, фоны +{acc.markup_pct_fon:g}%.",
-        f"На примере выше: floor {floor:.2f} → в заказ уйдёт {order_price:.2f} TON.",
-        "Цена считается по floor всей коллекции, а не по выбранным моделям — так и было "
-        "задумано.",
-        "",
-        "4. КАК ЧАСТО ЭТО ПРОИСХОДИТ",
-        "Цены в заказах обновляются каждый цикл — это быстро.",
-        f"Состав моделей пересматривается раз в {acc.models_interval_h:g}ч "
-        f"(последний раз — {fmt_ago(acc.last_models_ts)}), потому что перебор всех "
-        f"моделей долгий. Запустить вручную: /refreshmodels {acc.name}",
-        f"Цены моделей уточняются: "
-        f"{'все модели коллекции' if not acc.probe_limit else f'максимум {acc.probe_limit} моделей'}, "
-        f"по {acc.probe_markets} из 3 "
-        f"{plural(acc.probe_markets, 'маркета', 'маркетов', 'маркетов')}.",
-        "",
-        "5. ЧТО БОТ ПРОПУСКАЕТ ВСЕГДА",
-        "• заказы на фоны (где задан backdropNames) — там модели не трогаются",
-        "• модели с апострофом и подобными символами в названии — сервис отклоняет "
-        "такой список целиком",
-        "• если после всех фильтров не осталось ни одной модели, заказ остаётся как был "
-        "(пустой список означал бы «все модели подряд»)",
+def _rules_lines(acc) -> list:
+    """Сами правила отбора — то, что обычно одинаково у всех аккаунтов."""
+    return [
+        f"• Беру модели дороже floor коллекции на +{acc.premium_pct:g}%",
+        f"• Проверяю по {acc.sales_depth} последним продажам: свежие {acc.fresh_hours:g}ч "
+        f"не в счёт, нужно от {acc.min_sales} сделок",
+        f"• Отсеиваю как памп, только если без него модель не прошла бы порог",
+        f"• Цена заказа: floor +{acc.markup_pct:g}% (фоны +{acc.markup_pct_fon:g}%)",
+        f"• Пересматриваю состав раз в {acc.models_interval_h:g}ч, цены — каждый цикл",
     ]
-    if acc.models_mode != "off" and acc.last_models:
-        picked = sum(len(r["picked"]) for r in acc.last_models.values())
-        orders = len(acc.last_models)
-        lines += ["", f"В последний раз отобрано {picked} "
-                      f"{plural(picked, 'модель', 'модели', 'моделей')} "
-                      f"по {orders} {plural(orders, 'заказу', 'заказам', 'заказам')}. "
-                      f"Подробно: /models {acc.name}"]
+
+
+def filters_text(accounts: list) -> str:
+    """
+    Коротко: как настроен отбор. Правила у аккаунтов обычно одинаковые, поэтому
+    печатаем их один раз, а по аккаунтам показываем только режим и отличия.
+    """
+    lines = ["🔎 Как настроен отбор", ""]
+
+    # группируем по настройкам: одинаковые аккаунты не должны печататься по разу
+    def sig(a):
+        return (a.premium_pct, a.tol_pct, a.sales_depth, a.fresh_hours, a.min_sales,
+                a.markup_pct, a.markup_pct_fon, a.models_interval_h)
+
+    groups = {}
+    for acc in accounts:
+        groups.setdefault(sig(acc), []).append(acc)
+
+    if len(groups) == 1:
+        lines += _rules_lines(accounts[0])
+    else:
+        # настройки разные — печатаем блок на каждую группу, а не на каждый аккаунт
+        for group in groups.values():
+            lines.append(", ".join(a.name for a in group) + ":")
+            lines += _rules_lines(group[0])
+            lines.append("")
+
+    lines.append("")
+    lines.append("Режим: " + " · ".join(f"{a.name} {MODE_SHORT[a.models_mode]}" for a in accounts))
+
+    picked = sum(len(r["picked"]) for a in accounts for r in a.last_models.values())
+    if picked:
+        lines.append(f"Отобрано в прошлый раз: {picked} "
+                     f"{plural(picked, 'модель', 'модели', 'моделей')}. Подробно: /models")
     return "\n".join(lines)
 
 
@@ -502,7 +473,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "filters":
-        await _show(query, filters_text(acc)[:4000], _back_kb(idx))
+        await _show(query, filters_text([acc])[:4000], _back_kb(idx))
         return
 
     if action == "params":
