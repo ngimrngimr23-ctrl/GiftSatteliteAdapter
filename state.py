@@ -21,6 +21,21 @@ UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 REDIS_STATE_KEY = os.environ.get("REDIS_STATE_KEY", "giftadapter:state")
 _UPSTASH_ENABLED = bool(UPSTASH_URL and UPSTASH_TOKEN)
 
+# результат последней записи — чтобы в /status было видно, переживут ли настройки передеплой
+_LAST_SAVE = {"ok": None, "error": None}
+
+
+def storage_status() -> str:
+    """Где лежат настройки и уцелеют ли они при передеплое."""
+    if not _UPSTASH_ENABLED:
+        return ("⚠️ локальный файл — настройки СБРОСЯТСЯ при передеплое на Render. "
+                "Задай UPSTASH_REDIS_REST_URL и UPSTASH_REDIS_REST_TOKEN")
+    if _LAST_SAVE["ok"] is False:
+        return f"⚠️ Upstash настроен, но запись не прошла: {_LAST_SAVE['error']}"
+    if _LAST_SAVE["ok"] is None:
+        return "Upstash настроен (записи ещё не было)"
+    return "✅ Upstash — настройки переживают передеплой"
+
 
 @dataclass
 class AccountState:
@@ -102,7 +117,7 @@ def _load_from_upstash() -> dict:
         return {}
 
 
-def _save_to_upstash(data: dict):
+def _save_to_upstash(data: dict) -> bool:
     try:
         r = requests.post(
             f"{UPSTASH_URL}/set/{REDIS_STATE_KEY}",
@@ -111,8 +126,10 @@ def _save_to_upstash(data: dict):
             timeout=10,
         )
         r.raise_for_status()
+        return True
     except Exception as e:
         log.warning("не удалось сохранить состояние в Upstash: %s", e)
+        return False
 
 
 def _load_from_file() -> dict:
@@ -147,8 +164,14 @@ def load_persisted() -> dict:
 def save_persisted(accounts: dict):
     data = {name: acc.to_persist() for name, acc in accounts.items()}
     if _UPSTASH_ENABLED:
-        _save_to_upstash(data)
-        return
+        if _save_to_upstash(data):
+            _LAST_SAVE["ok"], _LAST_SAVE["error"] = True, None
+            return
+        # Upstash не ответил — пишем в файл, чтобы настройки уцелели хотя бы до
+        # перезапуска контейнера, а не пропали совсем
+        _LAST_SAVE["ok"], _LAST_SAVE["error"] = False, "Upstash недоступен, записал в файл"
+        log.error("Upstash недоступен — состояние записано в локальный файл, "
+                  "оно НЕ переживёт передеплой. Проверь UPSTASH_REDIS_REST_URL/TOKEN")
     _save_to_file(data)
 
 
