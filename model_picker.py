@@ -58,7 +58,8 @@ def pick_candidates(model_floors: dict, collection_floor: float, premium_pct: fl
 
 
 def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: float,
-               min_sales: int, fresh_hours: float, now: float) -> dict:
+               min_sales: int, fresh_hours: float, now: float,
+               exclude_backdrops: set | None = None) -> dict:
     """
     Настоящая ли премия модели. Возвращает
     {"verdict": "ok"|"pump"|"no_data", "median", "inflated", "used", "fresh_skipped"}.
@@ -75,11 +76,19 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
     затевалась: без пампа модель порог не проходит, то есть в список она
     попала бы исключительно из-за задранной цены.
     """
+    # Медиана и так устойчива к паре дорогих продаж, но когда редкий фон занимает
+    # заметную долю сделок, он её всё же тянет вверх — такие фоны можно исключить.
+    excluded = {b.strip().lower() for b in (exclude_backdrops or set()) if b.strip()}
     prices = []
     fresh_skipped = 0
+    backdrop_skipped = 0
     for sale in sales:
         price = sale.get("normalizedPrice")
         if price is None:
+            continue
+        backdrop = (sale.get("backdropName") or "").strip().lower()
+        if excluded and backdrop in excluded:
+            backdrop_skipped += 1
             continue
         sold_ts = parse_sold_at(sale.get("soldAt"))
         if sold_ts is not None and now - sold_ts < fresh_hours * 3600:
@@ -89,7 +98,8 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
 
     if len(prices) < min_sales:
         return {"verdict": "no_data", "median": None, "inflated": False,
-                "used": len(prices), "fresh_skipped": fresh_skipped}
+                "used": len(prices), "fresh_skipped": fresh_skipped,
+                "backdrop_skipped": backdrop_skipped}
 
     median = statistics.median(prices)
     # односторонне: current < median — это просадка, а не памп
@@ -97,7 +107,8 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
     # модель выбрасываем, только если без пампа она порога не проходит
     verdict = "pump" if inflated and median < threshold else "ok"
     return {"verdict": verdict, "median": median, "inflated": inflated,
-            "used": len(prices), "fresh_skipped": fresh_skipped}
+            "used": len(prices), "fresh_skipped": fresh_skipped,
+            "backdrop_skipped": backdrop_skipped}
 
 
 def trim_to_limit(models: list) -> list:
