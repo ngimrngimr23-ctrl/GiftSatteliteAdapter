@@ -257,7 +257,8 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     for model in candidates:
         sales = _fetch_sales(client, collection, model, account.sales_depth, account, now)
         result = check_pump(sales, all_floors[model], threshold, account.tol_pct,
-                            account.min_sales, account.fresh_hours, now)
+                            account.min_sales, account.fresh_hours, now,
+                            set(account.exclude_backdrops))
         details[model] = {"floor": all_floors[model], **result}
         if result["verdict"] == "ok":
             picked.append(model)

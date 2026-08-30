@@ -62,6 +62,7 @@ class AccountState:
     probe_limit: int = 0  # максимум моделей, чью цену доуточняем; 0 = без ограничения
     probe_markets: int = 3  # по скольким маркетам уточнять цену модели (3 = как считается floor коллекции)
     models_interval_h: float = 48.0  # как часто пересматривать состав моделей (цены обновляются отдельно и чаще)
+    exclude_backdrops: list = field(default_factory=list)  # фоны, чьи продажи не идут в медиану
     last_models_ts: Optional[float] = None  # когда состав моделей пересматривался в последний раз
     last_run_ts: Optional[float] = None
     last_updated_count: int = 0
@@ -91,6 +92,7 @@ class AccountState:
             "probe_limit": self.probe_limit,
             "probe_markets": self.probe_markets,
             "models_interval_h": self.models_interval_h,
+            "exclude_backdrops": self.exclude_backdrops,
             "last_models_ts": self.last_models_ts,
             "original_models": self.original_models,
         }

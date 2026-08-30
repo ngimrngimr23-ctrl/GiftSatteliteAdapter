@@ -54,6 +54,7 @@ def make_account(name: str, token: str, saved: dict | None = None, dynamic: bool
     acc.probe_limit = saved.get("probe_limit", acc.probe_limit)
     acc.probe_markets = saved.get("probe_markets", acc.probe_markets)
     acc.models_interval_h = saved.get("models_interval_h", acc.models_interval_h)
+    acc.exclude_backdrops = saved.get("exclude_backdrops", [])
     acc.last_models_ts = saved.get("last_models_ts", acc.last_models_ts)
     acc.original_models = saved.get("original_models", {})
     return acc
@@ -111,6 +112,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за проход (0 = все) и по скольким маркетам\n"
         "/setmodelsinterval <часы> — как часто пересматривать состав моделей (цены обновляются отдельно и чаще)\n"
         "/refreshmodels — пересмотреть состав моделей прямо сейчас (долго)\n"
+        "/excludebackdrops <фон, фон> — не учитывать продажи этих фонов при расчёте медианы\n"
         "/filters — понятным языком объяснить, как сейчас настроен отбор\n"
         "/models — что автоподбор выбрал и что отсеял в последний пересмотр\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
@@ -595,6 +597,44 @@ async def cmd_delaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_excludebackdrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/excludebackdrops [<acc>] <фон, фон> — не учитывать продажи этих фонов в медиане."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+
+    if not rest:
+        lines = ["Фоны, чьи продажи не идут в расчёт медианы:"]
+        for acc in targets:
+            lines.append(f"[{acc.name}] " + (", ".join(acc.exclude_backdrops) or "— пусто, учитываются все"))
+        lines.append("\nЗадать: /excludebackdrops Onyx Black, Deep Purple")
+        lines.append("Очистить: /excludebackdrops -")
+        lines.append("\nНужно редко: медиана и так не реагирует на пару дорогих продаж, "
+                     "перекос заметен только когда такой фон занимает около половины сделок.")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    raw = " ".join(rest)
+    names = [] if raw.strip() in ("-", "нет", "clear") else [n.strip() for n in raw.split(",") if n.strip()]
+    for acc in targets:
+        acc.exclude_backdrops = names
+    save_persisted(accounts)
+    who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    await update.message.reply_text(
+        (f"Для {who} продажи этих фонов больше не учитываются в медиане: {', '.join(names)}"
+         if names else f"Для {who} снова учитываются продажи всех фонов.")
+        + "\nПрименится при следующем пересмотре: /refreshmodels"
+    )
+
+
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/filters [<acc>] — человеческим языком объяснить, как сейчас настроен отбор."""
     if not authorized(update):
@@ -934,6 +974,7 @@ BOT_COMMANDS = [
     ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
     ("setmodelsinterval", "Как часто пересматривать состав моделей"),
     ("refreshmodels", "Пересмотреть состав моделей прямо сейчас"),
+    ("excludebackdrops", "Не учитывать продажи этих фонов в медиане"),
     ("filters", "Понятным языком: как сейчас настроен отбор"),
     ("models", "Что автоподбор выбрал и что отсеял"),
     ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
@@ -979,6 +1020,7 @@ def main():
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))
     app.add_handler(CommandHandler("refreshmodels", cmd_refreshmodels))
+    app.add_handler(CommandHandler("excludebackdrops", cmd_excludebackdrops))
     app.add_handler(CommandHandler("filters", cmd_filters))
     app.add_handler(CommandHandler("models", cmd_models))
     app.add_handler(CommandHandler("restoremodels", cmd_restoremodels))
