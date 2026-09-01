@@ -120,23 +120,18 @@ def refresh_summary_text(acc) -> str:
     if not acc.last_models:
         return f"[{acc.name}] заказов на модели не нашлось — менять нечего."
 
+    added = sum(len(r.get("added", [])) for r in acc.last_models.values())
+    removed = sum(len(r.get("removed", [])) for r in acc.last_models.values())
+    total = sum(len(r["picked"]) for r in acc.last_models.values())
+    empty = sum(1 for r in acc.last_models.values() if not r["picked"])
+
     lines = [f"[{acc.name}] пересмотр закончен"
-             + ("" if acc.models_mode == "on" else " (preview — заказы не тронуты)"), ""]
-
-    for sub_name, rep in acc.last_models.items():
-        added, removed = len(rep.get("added", [])), len(rep.get("removed", []))
-        if not rep["picked"]:
-            lines.append(f"• {sub_name}: отбор пустой, заказ не тронут")
-        elif not added and not removed:
-            lines.append(f"• {sub_name}: {len(rep['picked'])} "
-                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')}, без изменений")
-        else:
-            change = " ".join(filter(None, [f"+{added}" if added else "", f"−{removed}" if removed else ""]))
-            lines.append(f"• {sub_name}: {len(rep['picked'])} "
-                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')} ({change})")
-
-    lines.append(f"\nЗапросов {acc.last_requests}, ошибок {len(acc.errors)} · "
-                 f"подробно: /models {acc.name}")
+             + ("" if acc.models_mode == "on" else " (preview — заказы не тронуты)")]
+    lines.append(f"➕ добавлено {added} · ➖ удалено {removed} · всего в заказах {total}")
+    if empty:
+        lines.append(f"⚠️ у {empty} {plural(empty, 'заказа', 'заказов', 'заказов')} "
+                     f"отбор пустой, состав не тронут")
+    lines.append(f"Запросов {acc.last_requests}, ошибок {len(acc.errors)}")
     return "\n".join(lines)
 
 
