@@ -107,12 +107,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/automodels on|off|preview — автоподбор моделей: применять / не считать вовсе / "
         "считать и показывать в /models, ничего не меняя\n"
         "/setpremium <%> — насколько выше floor коллекции должна стоить модель, чтобы попасть в заказ\n"
-        "/setpumptol <%> — насколько цена может превышать медиану продаж, прежде чем это памп\n"
+        "/setpumptol <%> — насколько цена может превышать обычную цену модели, прежде чем это памп\n"
         "/setsalesdepth <n> — сколько последних продаж смотреть (20/40/100)\n"
         "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за проход (0 = все) и по скольким маркетам\n"
         "/setmodelsinterval <часы> — как часто пересматривать состав моделей (цены обновляются отдельно и чаще)\n"
         "/refreshmodels — пересмотреть состав моделей прямо сейчас (долго)\n"
-        "/excludebackdrops <фон, фон> — не учитывать продажи этих фонов при расчёте медианы\n"
+        "/excludebackdrops <фон, фон> — не учитывать продажи этих фонов при расчёте цены\n"
         "/filters — понятным языком объяснить, как сейчас настроен отбор\n"
         "/models — что автоподбор выбрал и что отсеял в последний пересмотр\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
@@ -445,7 +445,7 @@ async def cmd_setpumptol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/setpumptol [<acc>] <%> — допустимое превышение текущей цены над медианой продаж."""
     await _cmd_setnumber(
         update, context, "tol_pct", "/setpumptol", "/setpumptol 15",
-        lambda v: f"Памп — если цена выше медианы продаж более чем на {v:g}%",
+        lambda v: f"Памп — если цена выше обычной цены модели более чем на {v:g}%",
     )
 
 
@@ -612,7 +612,7 @@ async def cmd_excludebackdrops(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if not rest:
-        lines = ["Фоны, чьи продажи не идут в расчёт медианы:"]
+        lines = ["Фоны, чьи продажи не идут в расчёт цены:"]
         for acc in targets:
             lines.append(f"[{acc.name}] " + (", ".join(acc.exclude_backdrops) or "— пусто, учитываются все"))
         lines.append("\nЗадать: /excludebackdrops Onyx Black, Deep Purple")
@@ -629,7 +629,7 @@ async def cmd_excludebackdrops(update: Update, context: ContextTypes.DEFAULT_TYP
     save_persisted(accounts)
     who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
     await update.message.reply_text(
-        (f"Для {who} продажи этих фонов больше не учитываются в медиане: {', '.join(names)}"
+        (f"Для {who} продажи этих фонов больше не учитываются: {', '.join(names)}"
          if names else f"Для {who} снова учитываются продажи всех фонов.")
         + "\nПрименится при следующем пересмотре: /refreshmodels"
     )
@@ -969,12 +969,12 @@ BOT_COMMANDS = [
     ("setmarkupfon", "Наценка над floor для заказов на фоны"),
     ("automodels", "Автоподбор моделей: on|off|preview"),
     ("setpremium", "Порог премии модели над floor коллекции"),
-    ("setpumptol", "Допуск: насколько цена может превышать медиану продаж"),
+    ("setpumptol", "Допуск: насколько цена может превышать обычную цену"),
     ("setsalesdepth", "Сколько последних продаж смотреть (20/40/100)"),
     ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
     ("setmodelsinterval", "Как часто пересматривать состав моделей"),
     ("refreshmodels", "Пересмотреть состав моделей прямо сейчас"),
-    ("excludebackdrops", "Не учитывать продажи этих фонов в медиане"),
+    ("excludebackdrops", "Не учитывать продажи этих фонов при расчёте цены"),
     ("filters", "Понятным языком: как сейчас настроен отбор"),
     ("models", "Что автоподбор выбрал и что отсеял"),
     ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
