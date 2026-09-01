@@ -698,14 +698,9 @@ async def cmd_refreshmodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ran:
             await update.message.reply_text(f"[{acc.name}] цикл уже идёт — повтори позже.")
             continue
-        picked = sum(len(r["picked"]) for r in acc.last_models.values())
-        applied = sum(1 for r in acc.last_models.values() if r.get("applied"))
-        await update.message.reply_text(
-            f"[{acc.name}] готово: подписок разобрано {len(acc.last_models)}, "
-            f"моделей подобрано {picked}, подписок обновлено {applied}, "
-            f"запросов {acc.last_requests}, ошибок {len(acc.errors)}\n"
-            f"Подробности: /models {acc.name}"
-        )
+        text = menu.refresh_summary_text(acc)
+        for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
+            await update.message.reply_text(text[i:i + 4000])
     save_persisted(accounts)
 
 

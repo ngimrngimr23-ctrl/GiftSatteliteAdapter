@@ -112,6 +112,51 @@ def models_report_text(acc) -> str:
     return "\n".join(lines)
 
 
+def refresh_summary_text(acc) -> str:
+    """
+    Итог пересмотра моделей: по каждому заказу видно, что именно изменилось —
+    сколько моделей добавлено и сколько убрано, а не только общее число.
+    """
+    if not acc.last_models:
+        return f"[{acc.name}] заказов на модели не нашлось — менять нечего."
+
+    lines = [f"[{acc.name}] пересмотр закончен"
+             + ("" if acc.models_mode == "on" else " (режим preview — заказы не тронуты)")]
+
+    for sub_name, rep in acc.last_models.items():
+        added, removed = rep.get("added", []), rep.get("removed", [])
+        if not rep["picked"]:
+            lines.append(f"\n• {sub_name} — ни одна модель не прошла отбор, заказ оставлен как был")
+        elif not added and not removed:
+            lines.append(f"\n• {sub_name} — без изменений, {len(rep['picked'])} "
+                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')}")
+        else:
+            lines.append(f"\n• {sub_name} — стало {len(rep['picked'])} "
+                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')} "
+                         f"(было {rep.get('kept', 0) + len(removed)})")
+            if added:
+                lines.append(f"  ➕ добавлено {len(added)}: " + ", ".join(added[:10])
+                             + (f" … и ещё {len(added) - 10}" if len(added) > 10 else ""))
+            if removed:
+                lines.append(f"  ➖ убрано {len(removed)}: " + ", ".join(removed[:10])
+                             + (f" … и ещё {len(removed) - 10}" if len(removed) > 10 else ""))
+
+        # почему что-то не попало — самые частые причины, коротко
+        why = []
+        if rep["pumped"]:
+            why.append(f"{len(rep['pumped'])} отсеяно как памп")
+        if rep["no_data"]:
+            why.append(f"{len(rep['no_data'])} без истории продаж")
+        if rep.get("bad_format"):
+            why.append(f"{len(rep['bad_format'])} с непринимаемым именем")
+        if why:
+            lines.append(f"  из {rep['candidates']} кандидатов: " + ", ".join(why))
+
+    lines.append(f"\nЗапросов к API: {acc.last_requests}, ошибок: {len(acc.errors)}")
+    lines.append(f"Полный список моделей: /models {acc.name}")
+    return "\n".join(lines)
+
+
 MODE_SHORT = {"off": "❌ выкл", "preview": "👁 показывает", "on": "✅ применяет"}
 
 
@@ -446,13 +491,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ran:
             await _show(query, "Цикл уже идёт — повтори позже.", _back_kb(idx))
             return
-        picked = sum(len(r["picked"]) for r in acc.last_models.values())
-        applied = sum(1 for r in acc.last_models.values() if r.get("applied"))
         save_persisted(accounts)
-        await _show(query, f"[{acc.name}] готово: подписок разобрано {len(acc.last_models)}, "
-                           f"моделей подобрано {picked}, подписок обновлено {applied}, "
-                           f"запросов {acc.last_requests}, ошибок {len(acc.errors)}",
-                    _automodels_kb(idx, acc))
+        await _show(query, refresh_summary_text(acc)[:4000], _automodels_kb(idx, acc))
         return
 
     if action == "restore":

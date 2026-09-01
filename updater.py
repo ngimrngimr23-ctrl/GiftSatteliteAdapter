@@ -395,6 +395,14 @@ def _run_cycle_locked(account, force_models: bool):
             name = sub.get("subscriptionName", sub["_id"])
             report = _select_models(client, sub, floor, model_floors, account, now)
             report["applied"] = False
+            report["collection"] = sub.get("collectionName")
+            # что именно изменится в заказе по сравнению с тем, что там стоит сейчас
+            was = set(sub.get("modelNames") or [])
+            now_set = set(report["picked"])
+            # при пустом отборе состав не трогаем, значит и изменений нет
+            report["added"] = sorted(now_set - was) if report["picked"] else []
+            report["removed"] = sorted(was - now_set) if report["picked"] else []
+            report["kept"] = len(now_set & was) if report["picked"] else len(was)
             account.last_models[name] = report
             picked_total += len(report["picked"])
 
