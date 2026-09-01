@@ -10,6 +10,14 @@ BASE_URL = "https://api.gift-satellite.example"  # замени на реаль�
 
 MAX_429_RETRIES = 5  # сколько раз пережидать rate limit, прежде чем сдаться
 RETRY_BACKOFF_SECONDS = 2.0  # база линейного бэкоффа: 2с, 4с, 6с, ...
+
+# Документированный лимит (2 req/s у search и history) на практике срабатывает
+# раньше: при паузе 0.55с сервис регулярно отвечает 429, и каждый такой ответ
+# стоит 2 секунды простоя. Поэтому после каждого 429 пауза увеличивается и
+# остаётся такой до конца жизни процесса — клиент сам находит темп, который
+# сервис принимает, вместо того чтобы биться в лимит на каждом запросе.
+THROTTLE_STEP = 1.15  # во сколько раз растягиваем паузу после 429
+MAX_THROTTLE = 2.0  # выше этого не поднимаем, иначе проход встанет совсем
 HISTORY_PAGE_SIZE = 20  # жёсткий потолок pageSize у POST /history/:collection
 
 
@@ -47,6 +55,11 @@ class GiftApiClient:
                 break
             if attempt == MAX_429_RETRIES:
                 raise ApiError(f"{method} {path} -> 429: rate limit не отпустил за {MAX_429_RETRIES} попыток")
+            # раз лимит сработал — сбавляем темп на будущее, иначе следующий
+            # запрос упрётся точно так же
+            if self.min_interval < MAX_THROTTLE:
+                self.min_interval = min(MAX_THROTTLE, self.min_interval * THROTTLE_STEP)
+                log.info("сбавляю темп: пауза между запросами теперь %.2fс", self.min_interval)
             delay = RETRY_BACKOFF_SECONDS * (attempt + 1)
             log.warning("429 rate limit on %s, backing off %.1fs (попытка %d/%d)",
                         path, delay, attempt + 1, MAX_429_RETRIES)
