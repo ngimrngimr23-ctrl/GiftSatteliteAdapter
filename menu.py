@@ -121,39 +121,22 @@ def refresh_summary_text(acc) -> str:
         return f"[{acc.name}] заказов на модели не нашлось — менять нечего."
 
     lines = [f"[{acc.name}] пересмотр закончен"
-             + ("" if acc.models_mode == "on" else " (режим preview — заказы не тронуты)")]
+             + ("" if acc.models_mode == "on" else " (preview — заказы не тронуты)"), ""]
 
     for sub_name, rep in acc.last_models.items():
-        added, removed = rep.get("added", []), rep.get("removed", [])
+        added, removed = len(rep.get("added", [])), len(rep.get("removed", []))
         if not rep["picked"]:
-            lines.append(f"\n• {sub_name} — ни одна модель не прошла отбор, заказ оставлен как был")
+            lines.append(f"• {sub_name}: отбор пустой, заказ не тронут")
         elif not added and not removed:
-            lines.append(f"\n• {sub_name} — без изменений, {len(rep['picked'])} "
-                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')}")
+            lines.append(f"• {sub_name}: {len(rep['picked'])} "
+                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')}, без изменений")
         else:
-            lines.append(f"\n• {sub_name} — стало {len(rep['picked'])} "
-                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')} "
-                         f"(было {rep.get('kept', 0) + len(removed)})")
-            if added:
-                lines.append(f"  ➕ добавлено {len(added)}: " + ", ".join(added[:10])
-                             + (f" … и ещё {len(added) - 10}" if len(added) > 10 else ""))
-            if removed:
-                lines.append(f"  ➖ убрано {len(removed)}: " + ", ".join(removed[:10])
-                             + (f" … и ещё {len(removed) - 10}" if len(removed) > 10 else ""))
+            change = " ".join(filter(None, [f"+{added}" if added else "", f"−{removed}" if removed else ""]))
+            lines.append(f"• {sub_name}: {len(rep['picked'])} "
+                         f"{plural(len(rep['picked']), 'модель', 'модели', 'моделей')} ({change})")
 
-        # почему что-то не попало — самые частые причины, коротко
-        why = []
-        if rep["pumped"]:
-            why.append(f"{len(rep['pumped'])} отсеяно как памп")
-        if rep["no_data"]:
-            why.append(f"{len(rep['no_data'])} без истории продаж")
-        if rep.get("bad_format"):
-            why.append(f"{len(rep['bad_format'])} с непринимаемым именем")
-        if why:
-            lines.append(f"  из {rep['candidates']} кандидатов: " + ", ".join(why))
-
-    lines.append(f"\nЗапросов к API: {acc.last_requests}, ошибок: {len(acc.errors)}")
-    lines.append(f"Полный список моделей: /models {acc.name}")
+    lines.append(f"\nЗапросов {acc.last_requests}, ошибок {len(acc.errors)} · "
+                 f"подробно: /models {acc.name}")
     return "\n".join(lines)
 
 
