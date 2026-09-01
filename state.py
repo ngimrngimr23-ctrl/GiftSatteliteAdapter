@@ -55,14 +55,14 @@ class AccountState:
     # on — считает и применяет.
     models_mode: str = "off"
     premium_pct: float = 50.0  # на сколько % выше floor коллекции должна стоить модель (порог)
-    tol_pct: float = 15.0  # насколько текущая цена может превышать медиану продаж, прежде чем это памп
+    tol_pct: float = 15.0  # насколько текущая цена может превышать обычную, прежде чем это памп
     sales_depth: int = 100  # сколько последних продаж смотреть (кратно 20 — размеру страницы истории)
     fresh_hours: float = 24.0  # свежие продажи не идут в базу сравнения
     min_sales: int = 5  # меньше продаж в базе — проверить нечем, модель не берём
     probe_limit: int = 0  # максимум моделей, чью цену доуточняем; 0 = без ограничения
     probe_markets: int = 3  # по скольким маркетам уточнять цену модели (3 = как считается floor коллекции)
     models_interval_h: float = 48.0  # как часто пересматривать состав моделей (цены обновляются отдельно и чаще)
-    exclude_backdrops: list = field(default_factory=list)  # фоны, чьи продажи не идут в медиану
+    exclude_backdrops: list = field(default_factory=list)  # фоны, чьи продажи не идут в расчёт
     last_models_ts: Optional[float] = None  # когда состав моделей пересматривался в последний раз
     last_run_ts: Optional[float] = None
     last_updated_count: int = 0

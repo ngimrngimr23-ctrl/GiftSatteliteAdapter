@@ -8,7 +8,7 @@
 
 1. Кандидат — модель, чей текущий floor не ниже floor коллекции с премией
    premium_pct (порог, а не полоса: чем дороже модель, тем выгоднее).
-2. Премия должна быть настоящей, а не нарисованной пампом: медиана цен по
+2. Премия должна быть настоящей, а не нарисованной пампом: опорная цена по
    истории продаж модели должна быть не сильно ниже её текущей цены.
 
 Проверка односторонняя: модель, торгующаяся ДЕШЕВЛЕ своей истории, — это
@@ -29,9 +29,28 @@ MAX_MODEL_NAMES = 100  # жёсткий лимит modelNames в подписк�
 # все остальные, поэтому подозрительные имена отсеиваем до отправки.
 SUSPECT_CHARS = set("'\"’‘“”★☆%/\\#@!$^&*+=<>{}[]|~`")
 
+# Опорная цена модели берётся не по середине ряда продаж, а по нижней его части.
+# Причина: ордер срабатывает на САМОМ ДЕШЁВОМ листинге, значит достаётся нам
+# всегда низ распределения. Медиана описывает средний экземпляр и потому
+# систематически завышает то, что реально приедет. 20-й процентиль отбрасывает
+# примерно 4 самые дешёвые продажи из 20 — этого хватает, чтобы разовый
+# панический слив не задавал цену, но оценка остаётся в дешёвой зоне.
+REFERENCE_PERCENTILE = 20.0
+
 
 def has_suspect_chars(name: str) -> bool:
     return any(ch in SUSPECT_CHARS for ch in name)
+
+
+def percentile(values: list, p: float) -> float:
+    """P-й процентиль с линейной интерполяцией. p=50 даёт обычную медиану."""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * p / 100
+    low = int(pos)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
 
 
 def parse_sold_at(value) -> float | None:
@@ -62,21 +81,21 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
                exclude_backdrops: set | None = None) -> dict:
     """
     Настоящая ли премия модели. Возвращает
-    {"verdict": "ok"|"pump"|"no_data", "median", "inflated", "used", "fresh_skipped"}.
+    {"verdict": "ok"|"pump"|"no_data", "ref_price", "inflated", "used", "fresh_skipped"}.
 
     Из базы исключаются самые свежие продажи (моложе fresh_hours): если памп уже
-    успел набить сделок, они бы подтянули медиану к пампнутой цене и спрятали
-    его. Даты берём из soldAt, дополнительных запросов это не стоит.
+    успел набить сделок, они бы подтянули опорную цену вверх и спрятали его.
+    Даты берём из soldAt, дополнительных запросов это не стоит.
 
     Ключевой момент: задранная текущая цена сама по себе НЕ повод выбросить
     модель. Платим мы цену ордера, а не цену чужого листинга, поэтому важно
-    одно — сколько модель стоит на самом деле. Если медиана продаж всё равно
+    одно — сколько модель стоит на самом деле. Если опорная цена всё равно
     выше порога, модель законная, даже когда прямо сейчас её выставили втрое
     дороже обычного. Отсеиваем только тот случай, ради которого проверка и
     затевалась: без пампа модель порог не проходит, то есть в список она
     попала бы исключительно из-за задранной цены.
     """
-    # Медиана и так устойчива к паре дорогих продаж, но когда редкий фон занимает
+    # Опорная цена устойчива к паре дорогих продаж, но когда редкий фон занимает
     # заметную долю сделок, он её всё же тянет вверх — такие фоны можно исключить.
     excluded = {b.strip().lower() for b in (exclude_backdrops or set()) if b.strip()}
     prices = []
@@ -97,16 +116,16 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
         prices.append(price)
 
     if len(prices) < min_sales:
-        return {"verdict": "no_data", "median": None, "inflated": False,
+        return {"verdict": "no_data", "ref_price": None, "inflated": False,
                 "used": len(prices), "fresh_skipped": fresh_skipped,
                 "backdrop_skipped": backdrop_skipped}
 
-    median = statistics.median(prices)
-    # односторонне: current < median — это просадка, а не памп
-    inflated = median > 0 and current_floor > median * (1 + tol_pct / 100)
+    ref_price = percentile(prices, REFERENCE_PERCENTILE)
+    # односторонне: current < ref_price — это просадка, а не памп
+    inflated = ref_price > 0 and current_floor > ref_price * (1 + tol_pct / 100)
     # модель выбрасываем, только если без пампа она порога не проходит
-    verdict = "pump" if inflated and median < threshold else "ok"
-    return {"verdict": verdict, "median": median, "inflated": inflated,
+    verdict = "pump" if inflated and ref_price < threshold else "ok"
+    return {"verdict": verdict, "ref_price": ref_price, "inflated": inflated,
             "used": len(prices), "fresh_skipped": fresh_skipped,
             "backdrop_skipped": backdrop_skipped}
 

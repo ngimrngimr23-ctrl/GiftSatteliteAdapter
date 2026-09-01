@@ -91,17 +91,17 @@ def models_report_text(acc) -> str:
         for model in rep["picked"][:15]:
             d = rep["details"][model]
             if d.get("inflated"):
-                # цена задрана, но медиана всё равно выше порога — модель законная
+                # цена задрана, но обычная цена всё равно выше порога — модель законная
                 lines.append(f"  ✅ {model}: сейчас {d['floor']:.2f} (задрана), "
-                             f"медиана продаж {d['median']:.2f} — всё равно выше порога")
+                             f"обычно уходит за {d['ref_price']:.2f} — всё равно выше порога")
             else:
-                lines.append(f"  ✅ {model}: {d['floor']:.2f} TON, медиана продаж {d['median']:.2f} "
-                             f"(по {d['used']} сделкам)")
+                lines.append(f"  ✅ {model}: {d['floor']:.2f} TON, обычно уходит за "
+                             f"{d['ref_price']:.2f} (по {d['used']} сделкам)")
         if len(rep["picked"]) > 15:
             lines.append(f"  … и ещё {len(rep['picked']) - 15}")
         for model in rep["pumped"][:10]:
             d = rep["details"][model]
-            lines.append(f"  🚀 {model}: сейчас {d['floor']:.2f}, но медиана всего {d['median']:.2f} — "
+            lines.append(f"  🚀 {model}: сейчас {d['floor']:.2f}, но обычно уходит за {d['ref_price']:.2f} — "
                          f"ниже порога {rep['threshold']:.2f}, в список попала бы только из-за пампа")
         if rep["no_data"]:
             lines.append(f"  ⏳ мало сделок для проверки ({len(rep['no_data'])}): "
@@ -119,12 +119,13 @@ def _rules_lines(acc) -> list:
     """Сами правила отбора — то, что обычно одинаково у всех аккаунтов."""
     return [
         f"• Беру модели дороже floor коллекции на +{acc.premium_pct:g}%",
-        f"• Проверяю по {acc.sales_depth} последним продажам: свежие {acc.fresh_hours:g}ч "
-        f"не в счёт, нужно от {acc.min_sales} сделок",
+        f"• Обычную цену модели беру по {acc.sales_depth} последним продажам, по дешёвой их "
+        f"части: самые дешёвые ~20% отбрасываю как случайные сливы, свежие "
+        f"{acc.fresh_hours:g}ч не в счёт, нужно от {acc.min_sales} сделок",
         f"• Отсеиваю как памп, только если без него модель не прошла бы порог",
         f"• Цена заказа: floor {acc.markup_pct:+g}% (фоны {acc.markup_pct_fon:+g}%)",
         f"• Пересматриваю состав раз в {acc.models_interval_h:g}ч, цены — каждый цикл",
-    ] + ([f"• В медиану не идут продажи фонов: {', '.join(acc.exclude_backdrops)}"]
+    ] + ([f"• В расчёт не идут продажи фонов: {', '.join(acc.exclude_backdrops)}"]
          if acc.exclude_backdrops else [])
 
 
@@ -187,7 +188,7 @@ def _automodels_text(acc) -> str:
         "✅ on — считать и применять к подпискам",
         "",
         f"Отбор: модели дороже floor коллекции на +{acc.premium_pct:g}%,",
-        f"памп — если цена выше медианы продаж более чем на {acc.tol_pct:g}%.",
+        f"памп — если цена выше обычной более чем на {acc.tol_pct:g}%.",
         f"Пересмотр раз в {acc.models_interval_h:g}ч, последний — {fmt_ago(acc.last_models_ts)}.",
     ])
 
