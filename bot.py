@@ -5,6 +5,7 @@ import asyncio
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -832,9 +833,15 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _unknown_account_reply(update, accounts)
         return
 
-    text = "\n\n".join(menu.models_report_text(acc) for acc in targets)
-    for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
-        await update.message.reply_text(text[i:i + 4000])
+    for acc in targets:
+        await update.message.reply_text(menu.models_summary_text(acc))
+        if not acc.last_models:
+            continue
+        csv = menu.models_report_csv(acc)
+        # \ufeff в начале — иначе Excel открывает кириллицу кракозябрами
+        data = BytesIO(("\ufeff" + csv).encode("utf-8"))
+        data.name = f"models_{acc.name}_{datetime.now():%Y-%m-%d_%H%M}.csv"
+        await update.message.reply_document(document=data, filename=data.name)
 
 
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):

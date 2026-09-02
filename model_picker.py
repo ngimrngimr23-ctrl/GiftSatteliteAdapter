@@ -122,13 +122,32 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
                 "backdrop_skipped": backdrop_skipped}
 
     ref_price = percentile(prices, ref_percentile)
+
+    # --- дальше только диагностика, на вердикт она не влияет ---
+    # разброс цен внутри модели: широкий обычно означает, что цену сильно
+    # двигают фон и символ, а не сама модель
+    p20, p80 = percentile(prices, 20), percentile(prices, 80)
+    # дрейф: если дешёвые продажи в основном СТАРЫЕ, значит дорожала вся
+    # коллекция; если старые и новые стоят одинаково — разброс не от времени
+    dated = [(parse_sold_at(s.get("soldAt")), s.get("normalizedPrice"))
+             for s in sales if s.get("normalizedPrice") is not None]
+    dated = sorted([(t, p) for t, p in dated if t is not None])
+    drift_pct = None
+    if len(dated) >= 6:
+        half = len(dated) // 2
+        old_med = statistics.median([p for _, p in dated[:half]])
+        new_med = statistics.median([p for _, p in dated[half:]])
+        if old_med > 0:
+            drift_pct = (new_med / old_med - 1) * 100
+    span_days = (dated[-1][0] - dated[0][0]) / 86400 if len(dated) >= 2 else None
     # односторонне: current < ref_price — это просадка, а не памп
     inflated = ref_price > 0 and current_floor > ref_price * (1 + tol_pct / 100)
     # модель выбрасываем, только если без пампа она порога не проходит
     verdict = "pump" if inflated and ref_price < threshold else "ok"
     return {"verdict": verdict, "ref_price": ref_price, "inflated": inflated,
             "used": len(prices), "fresh_skipped": fresh_skipped,
-            "backdrop_skipped": backdrop_skipped}
+            "backdrop_skipped": backdrop_skipped,
+            "p20": p20, "p80": p80, "drift_pct": drift_pct, "span_days": span_days}
 
 
 def trim_to_limit(models: list) -> list:
