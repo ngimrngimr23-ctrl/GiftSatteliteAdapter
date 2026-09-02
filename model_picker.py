@@ -78,7 +78,8 @@ def pick_candidates(model_floors: dict, collection_floor: float, premium_pct: fl
 
 def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: float,
                min_sales: int, fresh_hours: float, now: float,
-               exclude_backdrops: set | None = None) -> dict:
+               exclude_backdrops: set | None = None,
+               ref_percentile: float = REFERENCE_PERCENTILE) -> dict:
     """
     Настоящая ли премия модели. Возвращает
     {"verdict": "ok"|"pump"|"no_data", "ref_price", "inflated", "used", "fresh_skipped"}.
@@ -120,7 +121,7 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
                 "used": len(prices), "fresh_skipped": fresh_skipped,
                 "backdrop_skipped": backdrop_skipped}
 
-    ref_price = percentile(prices, REFERENCE_PERCENTILE)
+    ref_price = percentile(prices, ref_percentile)
     # односторонне: current < ref_price — это просадка, а не памп
     inflated = ref_price > 0 and current_floor > ref_price * (1 + tol_pct / 100)
     # модель выбрасываем, только если без пампа она порога не проходит

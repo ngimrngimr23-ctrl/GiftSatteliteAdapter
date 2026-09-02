@@ -51,6 +51,7 @@ def make_account(name: str, token: str, saved: dict | None = None, dynamic: bool
     acc.sales_depth = saved.get("sales_depth", acc.sales_depth)
     acc.fresh_hours = saved.get("fresh_hours", acc.fresh_hours)
     acc.min_sales = saved.get("min_sales", acc.min_sales)
+    acc.ref_percentile = saved.get("ref_percentile", acc.ref_percentile)
     acc.probe_limit = saved.get("probe_limit", acc.probe_limit)
     acc.probe_markets = saved.get("probe_markets", acc.probe_markets)
     acc.models_interval_h = saved.get("models_interval_h", acc.models_interval_h)
@@ -108,6 +109,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "считать и показывать в /models, ничего не меняя\n"
         "/setpremium <%> — насколько выше floor коллекции должна стоить модель, чтобы попасть в заказ\n"
         "/setpumptol <%> — насколько цена может превышать обычную цену модели, прежде чем это памп\n"
+        "/setpercentile <n> — какую долю самых дешёвых продаж не брать в расчёт (1-50, сейчас 20)\n"
         "/setsalesdepth <n> — сколько последних продаж смотреть (20/40/100)\n"
         "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за проход (0 = все) и по скольким маркетам\n"
         "/setmodelsinterval <часы> — как часто пересматривать состав моделей (цены обновляются отдельно и чаще)\n"
@@ -446,6 +448,57 @@ async def cmd_setpumptol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _cmd_setnumber(
         update, context, "tol_pct", "/setpumptol", "/setpumptol 15",
         lambda v: f"Памп — если цена выше обычной цены модели более чем на {v:g}%",
+    )
+
+
+async def cmd_setpercentile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setpercentile [<acc>] <n> — по какой части ряда продаж считать обычную цену."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+    if not rest:
+        await update.message.reply_text(
+            "Использование: /setpercentile [<acc>] <n>, где n от 1 до 50\n\n"
+            "Сколько процентов самых дешёвых продаж считать случайными сливами "
+            "и не брать в расчёт обычной цены модели.\n"
+            "20 — сейчас (из 20 сделок отбрасываются 4 самые дешёвые)\n"
+            "50 — медиана, опора на середину ряда: оценка выше, но завышает\n"
+            "10 — почти самый дешёвый край: строже, но пара случайных сливов "
+            "начнёт ронять оценку\n\n"
+            f"Сейчас: " + ", ".join(f"{a.name} {a.ref_percentile:g}" for a in targets)
+        )
+        return
+    try:
+        value = float(rest[0])
+    except ValueError:
+        await update.message.reply_text("Значение должно быть числом, напр. /setpercentile 20")
+        return
+    if not 1 <= value <= 50:
+        await update.message.reply_text(
+            "Значение должно быть от 1 до 50.\n"
+            "Выше 50 смысла нет — это уже дороже середины ряда, а тебе по ордеру "
+            "приезжает дешёвый край."
+        )
+        return
+
+    for acc in targets:
+        acc.ref_percentile = value
+    save_persisted(accounts)
+    who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    skipped = round(20 * value / 100)
+    await update.message.reply_text(
+        f"Обычная цена модели считается по {value:g}-му процентилю — для {who}.\n"
+        f"Из 20 продаж отбрасываются примерно {skipped} самых дешёвых"
+        + (" (это медиана — опора на середину ряда)" if value == 50 else "")
+        + "\nПрименится при следующем /refreshmodels"
     )
 
 
@@ -965,6 +1018,7 @@ BOT_COMMANDS = [
     ("automodels", "Автоподбор моделей: on|off|preview"),
     ("setpremium", "Порог премии модели над floor коллекции"),
     ("setpumptol", "Допуск: насколько цена может превышать обычную цену"),
+    ("setpercentile", "Какую долю дешёвых продаж не брать в расчёт"),
     ("setsalesdepth", "Сколько последних продаж смотреть (20/40/100)"),
     ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
     ("setmodelsinterval", "Как часто пересматривать состав моделей"),
@@ -1011,6 +1065,7 @@ def main():
     app.add_handler(CommandHandler("automodels", cmd_automodels))
     app.add_handler(CommandHandler("setpremium", cmd_setpremium))
     app.add_handler(CommandHandler("setpumptol", cmd_setpumptol))
+    app.add_handler(CommandHandler("setpercentile", cmd_setpercentile))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))

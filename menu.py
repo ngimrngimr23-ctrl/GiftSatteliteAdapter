@@ -143,7 +143,7 @@ def _rules_lines(acc) -> list:
     return [
         f"• Беру модели дороже floor коллекции на +{acc.premium_pct:g}%",
         f"• Обычную цену модели беру по {acc.sales_depth} последним продажам, по дешёвой их "
-        f"части: самые дешёвые ~20% отбрасываю как случайные сливы, свежие "
+        f"части: самые дешёвые {acc.ref_percentile:g}% отбрасываю как случайные сливы, свежие "
         f"{acc.fresh_hours:g}ч не в счёт, нужно от {acc.min_sales} сделок",
         f"• Отсеиваю как памп, только если без него модель не прошла бы порог",
         f"• Цена заказа: floor {acc.markup_pct:+g}% (фоны {acc.markup_pct_fon:+g}%)",
@@ -224,6 +224,7 @@ def _params_text(acc) -> str:
         f"Допуск пампа: {acc.tol_pct:g}%  (насколько цена может быть выше истории)",
         f"Глубина истории: {acc.sales_depth} продаж",
         f"Свежие сделки не в счёт: {acc.fresh_hours:g}ч",
+        f"Отбрасываю самых дешёвых продаж: {acc.ref_percentile:g}%",
         f"Минимум сделок: {acc.min_sales}",
         f"Добор цен: {'все модели' if not acc.probe_limit else f'до {acc.probe_limit}'} "
         f"по {acc.probe_markets} маркет(ам)",
