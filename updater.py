@@ -240,7 +240,8 @@ def _fetch_sales(client, collection: str, model: str, depth: int, account, now: 
     return sales
 
 
-def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float) -> dict:
+def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float,
+                   buy_price: float | None = None) -> dict:
     """
     Полный отбор моделей для одной подписки: порог по премии, затем проверка
     каждой уцелевшей модели по истории продаж. Возвращает отчёт для /models.
@@ -288,7 +289,8 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
         sales = _fetch_sales(client, collection, model, account.sales_depth, account, now)
         result = check_pump(sales, all_floors[model], threshold, account.tol_pct,
                             account.min_sales, account.fresh_hours, now,
-                            set(account.exclude_backdrops), account.ref_percentile)
+                            set(account.exclude_backdrops), account.ref_percentile,
+                            buy_price)
         details[model].update(result)
         details[model]["sales_total"] = len(sales)
         if result["verdict"] == "ok":
@@ -309,6 +311,7 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
         "seen": len(all_floors),
         "candidates": len(candidates),
         "threshold": threshold,
+        "buy_price": buy_price,
         "details": details,
     }
 
@@ -427,7 +430,7 @@ def _run_cycle_locked(account, force_models: bool):
             if _is_fon_order(sub):
                 continue  # фоны не трогаем: их листинги отфильтрованы по backdropNames
             name = sub.get("subscriptionName", sub["_id"])
-            report = _select_models(client, sub, floor, model_floors, account, now)
+            report = _select_models(client, sub, floor, model_floors, account, now, new_price)
             report["applied"] = False
             report["collection"] = sub.get("collectionName")
             # что именно изменится в заказе по сравнению с тем, что там стоит сейчас

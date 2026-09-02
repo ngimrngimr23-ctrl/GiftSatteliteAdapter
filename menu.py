@@ -118,8 +118,10 @@ def models_report_csv(accounts: list) -> str:
     Полная выгрузка последнего пересмотра ОДНИМ файлом на все аккаунты: строка
     на каждую увиденную модель, включая те, что не дошли до порога.
     """
-    rows = ["аккаунт;заказ;модель;редкость;статус;цена сейчас;премия к floor %;"
-            "обычная цена;дешёвый край p20;дорогой край p80;разброс p80/p20;"
+    rows = ["аккаунт;заказ;модель;редкость %;статус;цена сейчас;премия к floor %;"
+            "обычная цена;дешёвый край p20;середина p50;дорогой край p80;разброс p80/p20;"
+            "цена закупки;доля сделок выше закупки %;доля сделок выше закупки +20% %;"
+            "сделок в месяц;вердикт при p50;"
             "сделок учтено;сделок всего;история за дней;дрейф цены %;порог"]
 
     def num(value, digits=2):
@@ -133,16 +135,24 @@ def models_report_csv(accounts: list) -> str:
                                    key=lambda kv: kv[1].get("floor") or 0, reverse=True):
                 p20, p80 = d.get("p20"), d.get("p80")
                 spread = (p80 / p20) if p20 and p80 else None
+                # rarity сервис отдаёт в тысячных: 5 — это 0.5%, а не 5%
+                rarity = d.get("rarity")
+                verdict50 = {"ok": "взята", "pump": "отсев"}.get(d.get("verdict50"), "")
                 rows.append(";".join([
                     acc.name,
                     sub_name.replace(";", ","),
                     model.replace(";", ","),
-                    str(d.get("rarity") if d.get("rarity") is not None else ""),
+                    num(rarity / 10, 1) if rarity is not None else "",
                     d.get("status", ""),
                     num(d.get("floor")),
                     num(d.get("premium_pct"), 1),
                     num(d.get("ref_price")),
-                    num(p20), num(p80), num(spread, 2),
+                    num(p20), num(d.get("ref50")), num(p80), num(spread, 2),
+                    num(d.get("buy_price")),
+                    num(d.get("share_buy"), 0),
+                    num(d.get("share_buy_20"), 0),
+                    num(d.get("per_month"), 1),
+                    verdict50,
                     str(d.get("used", "")),
                     str(d.get("sales_total", "")),
                     num(d.get("span_days"), 1),
@@ -161,6 +171,10 @@ def models_summary_text(accounts: list) -> str:
 
     by_status, rarity_of, drifts = {}, {}, []
     orders = 0
+    # сравнение двух правил на одних и тех же моделях: сколько берёт нынешний
+    # процентиль, сколько взяла бы медиана, и как ложится доля сделок
+    now_ok = p50_ok = checked = 0
+    share_ok, share_bad, slow = [], [], 0
     for acc in with_data:
         orders += len(acc.last_models)
         for rep in acc.last_models.values():
@@ -171,19 +185,45 @@ def models_summary_text(accounts: list) -> str:
                     rarity_of.setdefault(status, []).append(d["rarity"])
                 if d.get("drift_pct") is not None:
                     drifts.append(d["drift_pct"])
+                if d.get("verdict50"):
+                    checked += 1
+                    if d.get("verdict") == "ok":
+                        now_ok += 1
+                    if d["verdict50"] == "ok":
+                        p50_ok += 1
+                    # берём долю с маржой: без неё почти всё показывает 90-100%
+                    # (выше голой цены закупки продаётся практически что угодно)
+                    if d.get("share_buy_20") is not None:
+                        (share_ok if d.get("verdict") == "ok" else share_bad).append(d["share_buy_20"])
+                    if (d.get("per_month") or 99) < 2:
+                        slow += 1
 
     lines = [f"📄 Разбор отбора: аккаунтов {len(with_data)}, заказов {orders}, "
              f"моделей {sum(by_status.values())}", ""]
     for status, count in sorted(by_status.items(), key=lambda kv: -kv[1]):
         rar = rarity_of.get(status)
         # медианная редкость по группе: видно, отсеиваются редкие модели или рядовые
-        tail = (f" · медианная редкость {int(statistics.median(rar))}" if rar else "")
+        tail = (f" · медианная редкость {statistics.median(rar) / 10:g}%" if rar else "")
         lines.append(f"• {status}: {count}{tail}")
 
     if drifts:
         lines += ["", f"Дрейф цен по истории: медиана {statistics.median(drifts):+.0f}%",
                   "(сильный плюс — коллекция дорожала, и старые продажи занижают оценку;"
                   " около нуля — разброс идёт от фонов, а не от времени)"]
+
+    if checked:
+        lines += ["", f"Проверено по истории: {checked} моделей",
+                  f"• нынешнее правило берёт: {now_ok}",
+                  f"• медиана (p50) взяла бы: {p50_ok}"]
+        if share_ok:
+            lines.append(f"• доля сделок дороже закупки хотя бы на 20% — у взятых медиана "
+                         f"{statistics.median(share_ok):.0f}%")
+        if share_bad:
+            lines.append(f"• то же у отсеянных: {statistics.median(share_bad):.0f}%")
+        lines.append("(если у отсеянных эта доля высокая — их выкидывают зря)")
+        if slow:
+            lines.append(f"• торгуются реже 2 раз в месяц: {slow} — по цене могут "
+                         f"проходить, но лежать будут месяцами")
 
     skipped = [a.name for a in accounts if not a.last_models]
     if skipped:
