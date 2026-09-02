@@ -22,6 +22,7 @@ _CYCLE_LOCK = threading.Lock()
 # данных один раз, а не по разу каждый.
 _HISTORY_CACHE: dict = {}  # {(collection, model): (ts, [продажи])}
 _PROBE_CACHE: dict = {}  # {collection: (ts, {model: floor})}
+_CATALOG_CACHE: dict = {}  # {collection: (ts, {model: rarity})}
 
 # Поля, которые нужно переслать обратно в PUT /user/update-subscription/:id
 # (тело идентично POST /user/subscribe)
@@ -145,7 +146,32 @@ def _scan_collection(client, sub: dict, account) -> tuple[float | None, dict]:
     return statistics.median(market_floors), model_floors
 
 
-def _probe_model_floors(client, collection: str, known: dict, account) -> dict:
+def _collection_catalog(client, collection: str, account, now: float) -> dict:
+    """
+    Каталог моделей коллекции: {имя: rarity}. rarity — сколько всего подарков
+    этой модели выпущено, то есть чем число меньше, тем модель реже.
+    Кешируется вместе с ценами: список моделей меняется ещё реже, чем цены.
+    """
+    cached = _CATALOG_CACHE.get(collection)
+    if cached and now - cached[0] < PROBE_CACHE_HOURS * 3600:
+        return cached[1]
+    try:
+        catalog = client.get_models(collection)
+    except ApiError as e:
+        account.record_error(f"get_models {collection}: {e}")
+        return {}
+    rarity = {}
+    for item in catalog or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name.strip():
+            rarity[name.strip()] = item.get("rarity")
+    _CATALOG_CACHE[collection] = (now, rarity)
+    return rarity
+
+
+def _probe_model_floors(client, collection: str, known: dict, account, catalog: dict) -> dict:
     """
     Доуточняет цены моделей, не попавших в дешёвую выдачу поиска.
 
@@ -156,17 +182,7 @@ def _probe_model_floors(client, collection: str, known: dict, account) -> dict:
     втрое, а на сравнение с порогом и с историей точность третьего знака
     всё равно не влияет).
     """
-    try:
-        catalog = client.get_models(collection)
-    except ApiError as e:
-        account.record_error(f"get_models {collection}: {e}")
-        return {}
-
-    names = []
-    for item in catalog or []:
-        name = item.get("name") if isinstance(item, dict) else item
-        if isinstance(name, str) and name.strip() and name.strip() not in known:
-            names.append(name.strip())
+    names = [name for name in catalog if name not in known]
 
     if account.probe_limit and len(names) > account.probe_limit:
         log.info("[%s] моделей для добора %d, беру %d (probe_limit)",
@@ -233,11 +249,12 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     # Добор цен зависит только от коллекции — ни от подписки, ни от аккаунта.
     # Поэтому результат кладём в общий кеш: и другие подписки на ту же
     # коллекцию, и другие аккаунты берут готовое вместо сотен своих запросов.
+    catalog = _collection_catalog(client, collection, account, now)
     cached = _PROBE_CACHE.get(collection)
     if cached and now - cached[0] < PROBE_CACHE_HOURS * 3600:
         probed = cached[1]
     else:
-        probed = _probe_model_floors(client, collection, model_floors, account)
+        probed = _probe_model_floors(client, collection, model_floors, account, catalog)
         _PROBE_CACHE[collection] = (now, probed)
     all_floors = dict(model_floors)
     all_floors.update(probed)
@@ -252,20 +269,37 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     candidates = [m for m in all_candidates if not has_suspect_chars(m)]
     bad_format = [m for m in all_candidates if has_suspect_chars(m)]
 
-    picked, pumped, no_data = [], [], []
+    # Диагностика: записываем ВСЕ увиденные модели, включая не дошедшие до
+    # порога и отсеянные по имени. Без этого в отчёте не видно, кого и почему
+    # отбор не рассматривал вовсе.
     details = {}
+    for model, model_floor in all_floors.items():
+        details[model] = {
+            "floor": model_floor,
+            "rarity": catalog.get(model),
+            "status": "ниже порога",
+            "premium_pct": (model_floor / floor - 1) * 100 if floor else None,
+        }
+    for model in bad_format:
+        details[model]["status"] = "имя не принимается сервисом"
+
+    picked, pumped, no_data = [], [], []
     for model in candidates:
         sales = _fetch_sales(client, collection, model, account.sales_depth, account, now)
         result = check_pump(sales, all_floors[model], threshold, account.tol_pct,
                             account.min_sales, account.fresh_hours, now,
                             set(account.exclude_backdrops), account.ref_percentile)
-        details[model] = {"floor": all_floors[model], **result}
+        details[model].update(result)
+        details[model]["sales_total"] = len(sales)
         if result["verdict"] == "ok":
             picked.append(model)
+            details[model]["status"] = "взята"
         elif result["verdict"] == "pump":
             pumped.append(model)
+            details[model]["status"] = "отсев: цена задрана, без неё порог не проходит"
         else:
             no_data.append(model)
+            details[model]["status"] = "отсев: мало сделок для проверки"
 
     return {
         "picked": trim_to_limit(picked),
