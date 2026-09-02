@@ -833,15 +833,15 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _unknown_account_reply(update, accounts)
         return
 
-    for acc in targets:
-        await update.message.reply_text(menu.models_summary_text(acc))
-        if not acc.last_models:
-            continue
-        csv = menu.models_report_csv(acc)
-        # \ufeff в начале — иначе Excel открывает кириллицу кракозябрами
-        data = BytesIO(("\ufeff" + csv).encode("utf-8"))
-        data.name = f"models_{acc.name}_{datetime.now():%Y-%m-%d_%H%M}.csv"
-        await update.message.reply_document(document=data, filename=data.name)
+    # одна сводка и один файл на все аккаунты, а не по паре сообщений на каждый
+    await update.message.reply_text(menu.models_summary_text(targets))
+    if not any(acc.last_models for acc in targets):
+        return
+    # \ufeff в начале — иначе Excel открывает кириллицу кракозябрами
+    data = BytesIO(("\ufeff" + menu.models_report_csv(targets)).encode("utf-8"))
+    scope = targets[0].name if len(targets) == 1 else "all"
+    data.name = f"models_{scope}_{datetime.now():%Y-%m-%d_%H%M}.csv"
+    await update.message.reply_document(document=data, filename=data.name)
 
 
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):

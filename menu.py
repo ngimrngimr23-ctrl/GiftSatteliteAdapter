@@ -113,13 +113,12 @@ def models_report_text(acc) -> str:
     return "\n".join(lines)
 
 
-def models_report_csv(acc) -> str:
+def models_report_csv(accounts: list) -> str:
     """
-    Полная выгрузка последнего пересмотра: строка на каждую увиденную модель,
-    включая те, что не дошли до порога. Сообщением такое не отправить, поэтому
-    отдаём файлом — заодно можно сортировать и считать в таблице.
+    Полная выгрузка последнего пересмотра ОДНИМ файлом на все аккаунты: строка
+    на каждую увиденную модель, включая те, что не дошли до порога.
     """
-    rows = ["заказ;модель;редкость;статус;цена сейчас;премия к floor %;"
+    rows = ["аккаунт;заказ;модель;редкость;статус;цена сейчас;премия к floor %;"
             "обычная цена;дешёвый край p20;дорогой край p80;разброс p80/p20;"
             "сделок учтено;сделок всего;история за дней;дрейф цены %;порог"]
 
@@ -128,59 +127,67 @@ def models_report_csv(acc) -> str:
             return ""
         return f"{value:.{digits}f}".replace(".", ",")  # запятая — чтобы Excel понял как число
 
-    for sub_name, rep in acc.last_models.items():
-        for model, d in sorted(rep["details"].items(),
-                               key=lambda kv: kv[1].get("floor") or 0, reverse=True):
-            p20, p80 = d.get("p20"), d.get("p80")
-            spread = (p80 / p20) if p20 and p80 else None
-            rows.append(";".join([
-                sub_name.replace(";", ","),
-                model.replace(";", ","),
-                str(d.get("rarity") if d.get("rarity") is not None else ""),
-                d.get("status", ""),
-                num(d.get("floor")),
-                num(d.get("premium_pct"), 1),
-                num(d.get("ref_price")),
-                num(p20), num(p80), num(spread, 2),
-                str(d.get("used", "")),
-                str(d.get("sales_total", "")),
-                num(d.get("span_days"), 1),
-                num(d.get("drift_pct"), 1),
-                num(rep.get("threshold")),
-            ]))
+    for acc in accounts:
+        for sub_name, rep in acc.last_models.items():
+            for model, d in sorted(rep["details"].items(),
+                                   key=lambda kv: kv[1].get("floor") or 0, reverse=True):
+                p20, p80 = d.get("p20"), d.get("p80")
+                spread = (p80 / p20) if p20 and p80 else None
+                rows.append(";".join([
+                    acc.name,
+                    sub_name.replace(";", ","),
+                    model.replace(";", ","),
+                    str(d.get("rarity") if d.get("rarity") is not None else ""),
+                    d.get("status", ""),
+                    num(d.get("floor")),
+                    num(d.get("premium_pct"), 1),
+                    num(d.get("ref_price")),
+                    num(p20), num(p80), num(spread, 2),
+                    str(d.get("used", "")),
+                    str(d.get("sales_total", "")),
+                    num(d.get("span_days"), 1),
+                    num(d.get("drift_pct"), 1),
+                    num(rep.get("threshold")),
+                ]))
     return "\n".join(rows)
 
 
-def models_summary_text(acc) -> str:
-    """Короткая сводка к файлу: сколько моделей в каком статусе и есть ли перекос по редкости."""
-    if not acc.last_models:
-        return (f"[{acc.name}] отчёта пока нет — пересмотр моделей ещё не запускался.\n"
-                f"Режим сейчас: {acc.models_mode}")
+def models_summary_text(accounts: list) -> str:
+    """Одна сводка к файлу по всем аккаунтам: статусы, редкость, дрейф."""
+    with_data = [a for a in accounts if a.last_models]
+    if not with_data:
+        return ("Отчёта пока нет — пересмотр моделей ещё не запускался ни по одному аккаунту.\n"
+                "Запустить: /refreshmodels")
 
-    by_status, rarity_of = {}, {}
-    for rep in acc.last_models.values():
-        for model, d in rep["details"].items():
-            status = d.get("status", "?")
-            by_status[status] = by_status.get(status, 0) + 1
-            if d.get("rarity") is not None:
-                rarity_of.setdefault(status, []).append(d["rarity"])
+    by_status, rarity_of, drifts = {}, {}, []
+    orders = 0
+    for acc in with_data:
+        orders += len(acc.last_models)
+        for rep in acc.last_models.values():
+            for d in rep["details"].values():
+                status = d.get("status", "?")
+                by_status[status] = by_status.get(status, 0) + 1
+                if d.get("rarity") is not None:
+                    rarity_of.setdefault(status, []).append(d["rarity"])
+                if d.get("drift_pct") is not None:
+                    drifts.append(d["drift_pct"])
 
-    lines = [f"[{acc.name}] пересмотр: заказов {len(acc.last_models)}, "
-             f"моделей всего {sum(by_status.values())}", ""]
+    lines = [f"📄 Разбор отбора: аккаунтов {len(with_data)}, заказов {orders}, "
+             f"моделей {sum(by_status.values())}", ""]
     for status, count in sorted(by_status.items(), key=lambda kv: -kv[1]):
         rar = rarity_of.get(status)
         # медианная редкость по группе: видно, отсеиваются редкие модели или рядовые
         tail = (f" · медианная редкость {int(statistics.median(rar))}" if rar else "")
         lines.append(f"• {status}: {count}{tail}")
 
-    drifts = [d["drift_pct"] for rep in acc.last_models.values()
-              for d in rep["details"].values() if d.get("drift_pct") is not None]
     if drifts:
-        med = statistics.median(drifts)
-        lines += ["", f"Дрейф цен по истории: медиана {med:+.0f}%",
+        lines += ["", f"Дрейф цен по истории: медиана {statistics.median(drifts):+.0f}%",
                   "(сильный плюс — коллекция дорожала, и старые продажи занижают оценку;"
                   " около нуля — разброс идёт от фонов, а не от времени)"]
-    lines.append("\nПодробности по каждой модели — в файле.")
+
+    skipped = [a.name for a in accounts if not a.last_models]
+    if skipped:
+        lines.append(f"\nБез данных (пересмотр не запускался): {', '.join(skipped)}")
     return "\n".join(lines)
 
 
