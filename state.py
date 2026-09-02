@@ -59,6 +59,7 @@ class AccountState:
     sales_depth: int = 100  # сколько последних продаж смотреть (кратно 20 — размеру страницы истории)
     fresh_hours: float = 24.0  # свежие продажи не идут в базу сравнения
     min_sales: int = 5  # меньше продаж в базе — проверить нечем, модель не берём
+    ref_percentile: float = 20.0  # по какой части ряда продаж считать обычную цену (50 = медиана)
     probe_limit: int = 0  # максимум моделей, чью цену доуточняем; 0 = без ограничения
     probe_markets: int = 3  # по скольким маркетам уточнять цену модели (3 = как считается floor коллекции)
     models_interval_h: float = 48.0  # как часто пересматривать состав моделей (цены обновляются отдельно и чаще)
@@ -89,6 +90,7 @@ class AccountState:
             "sales_depth": self.sales_depth,
             "fresh_hours": self.fresh_hours,
             "min_sales": self.min_sales,
+            "ref_percentile": self.ref_percentile,
             "probe_limit": self.probe_limit,
             "probe_markets": self.probe_markets,
             "models_interval_h": self.models_interval_h,
