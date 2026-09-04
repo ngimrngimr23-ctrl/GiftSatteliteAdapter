@@ -53,6 +53,15 @@ def percentile(values: list, p: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
 
 
+def share_above(prices: list, level: float) -> float | None:
+    """Доля сделок, прошедших дороже level. Именно этим числом предлагается
+    заменить одну опорную точку: оно описывает весь ряд сделок сразу и почти
+    не шатается от одной мусорной продажи (одна сделка из 16 — это 6%)."""
+    if not prices or level is None or level <= 0:
+        return None
+    return sum(1 for p in prices if p > level) / len(prices) * 100
+
+
 def parse_sold_at(value) -> float | None:
     """soldAt приходит как ISO 8601 с 'Z' — переводим в unix-время."""
     if not isinstance(value, str) or not value:
@@ -79,7 +88,8 @@ def pick_candidates(model_floors: dict, collection_floor: float, premium_pct: fl
 def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: float,
                min_sales: int, fresh_hours: float, now: float,
                exclude_backdrops: set | None = None,
-               ref_percentile: float = REFERENCE_PERCENTILE) -> dict:
+               ref_percentile: float = REFERENCE_PERCENTILE,
+               buy_price: float | None = None) -> dict:
     """
     Настоящая ли премия модели. Возвращает
     {"verdict": "ok"|"pump"|"no_data", "ref_price", "inflated", "used", "fresh_skipped"}.
@@ -140,6 +150,17 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
         if old_med > 0:
             drift_pct = (new_med / old_med - 1) * 100
     span_days = (dated[-1][0] - dated[0][0]) / 86400 if len(dated) >= 2 else None
+    # как часто модель вообще торгуется: по цене может сходиться всё, но сидеть
+    # с ней месяцами — тоже убыток, а в отборе это сейчас никак не учтено
+    per_month = len(prices) / span_days * 30 if span_days and span_days > 0 else None
+    # доля сделок выше цены, которую реально заплатит ордер (и она же с маржой)
+    share_buy = share_above(prices, buy_price)
+    share_buy_20 = share_above(prices, buy_price * 1.2) if buy_price else None
+    # чем кончилась бы проверка, стой ref_percentile на 50 (медиана) — чтобы
+    # сравнить два правила на одних и тех же моделях, ничего не переключая
+    ref50 = percentile(prices, 50)
+    inflated50 = ref50 > 0 and current_floor > ref50 * (1 + tol_pct / 100)
+    verdict50 = "pump" if inflated50 and ref50 < threshold else "ok"
     # односторонне: current < ref_price — это просадка, а не памп
     inflated = ref_price > 0 and current_floor > ref_price * (1 + tol_pct / 100)
     # модель выбрасываем, только если без пампа она порога не проходит
@@ -147,7 +168,9 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
     return {"verdict": verdict, "ref_price": ref_price, "inflated": inflated,
             "used": len(prices), "fresh_skipped": fresh_skipped,
             "backdrop_skipped": backdrop_skipped,
-            "p20": p20, "p80": p80, "drift_pct": drift_pct, "span_days": span_days}
+            "p20": p20, "p80": p80, "drift_pct": drift_pct, "span_days": span_days,
+            "per_month": per_month, "share_buy": share_buy, "share_buy_20": share_buy_20,
+            "ref50": ref50, "verdict50": verdict50, "buy_price": buy_price}
 
 
 def trim_to_limit(models: list) -> list:
