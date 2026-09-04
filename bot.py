@@ -17,6 +17,7 @@ from api_client import GiftApiClient
 from state import (AccountState, load_persisted, save_persisted, load_global_settings,
                    save_global_settings, storage_status)
 from updater import run_cycle
+import monochrome
 
 load_dotenv()
 
@@ -31,6 +32,7 @@ ALLOWED_CHAT_IDS = {int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").split
 DEFAULT_CYCLE_SECONDS = int(os.environ.get("CYCLE_SECONDS", 3600))  # используется, только если интервал ещё ни разу не меняли через /setinterval
 MIN_INTERVAL_MINUTES = 1
 GIFT_API_BASE_URL = os.environ.get("GIFT_API_BASE_URL")
+WIKI_API_KEY = os.environ.get("WIKI_API_KEY")  # giftwiki, скоуп collection:read
 ACCOUNTS_CFG = json.loads(os.environ["ACCOUNTS_JSON"])  # [{"name": "...", "api_token": "..."}, ...]
 CYCLE_JOB_NAME = "scheduled_cycle"
 
@@ -119,6 +121,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/filters — понятным языком объяснить, как сейчас настроен отбор\n"
         "/models — что автоподбор выбрал и что отсеял в последний пересмотр\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
+        "/monochrome [подарок] — пары подарок+фон: где больше всего моделей влезает в один заказ\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
@@ -844,6 +847,73 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(document=data, filename=data.name)
 
 
+async def cmd_monochrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /monochrome [<подарок>[, <подарок>...]] — у какого подарка и с каким фоном
+    монохромны сразу много моделей.
+
+    Смысл: цена у подписки одна на весь заказ, поэтому выгоднее та пара, под
+    которую попадает максимум моделей — один ордер ловит их все под общий floor.
+    """
+    if not authorized(update):
+        return
+    if not WIKI_API_KEY:
+        await update.message.reply_text(
+            "Не задан WIKI_API_KEY — это ключ giftwiki со скоупом collection:read.\n"
+            "Добавь его в переменные окружения на Render и перезапусти сервис."
+        )
+        return
+
+    # аргументы: список подарков через запятую, плюс необязательное :type
+    raw = " ".join(context.args)
+    types = ["high", "combo"]
+    if ":" in raw:
+        raw, _, tail = raw.partition(":")
+        types = [t.strip() for t in tail.replace(",", " ").split() if t.strip()] or types
+    gifts = [g.strip() for g in raw.split(",") if g.strip()]
+
+    scope = ", ".join(gifts) if gifts else "все подарки (постранично, это дольше)"
+    await update.message.reply_text(f"Собираю монохромы: {scope}. Сочетания: {', '.join(types)}")
+
+    def work():
+        try:
+            return monochrome.fetch(WIKI_API_KEY, gifts=gifts or None, types=types), None
+        except monochrome.WikiForbidden as e:
+            # ключу приложения фильтр по названию подарка недоступен — идём постранично
+            if gifts:
+                try:
+                    return monochrome.fetch(WIKI_API_KEY, types=types), "paged"
+                except monochrome.WikiError as e2:
+                    return None, str(e2)
+            return None, str(e)
+        except monochrome.WikiError as e:
+            return None, str(e)
+
+    result, note = await asyncio.to_thread(work)
+    if result is None:
+        await update.message.reply_text(f"giftwiki не ответил: {note}")
+        return
+    records, client = result
+    if note == "paged":
+        await update.message.reply_text(
+            "Ключу недоступен поиск по названию подарка — собрал весь список постранично."
+        )
+
+    rows = monochrome.rank(records)
+    if gifts and note == "paged":
+        wanted = {g.lower() for g in gifts}
+        rows = [r for r in rows if r["gift"].lower() in wanted] or rows
+
+    await update.message.reply_text(
+        menu.monochrome_text(rows) + f"\n\nЗаписей {len(records)}, запросов {client.request_count}"
+    )
+    if not rows:
+        return
+    data = BytesIO(("\ufeff" + menu.monochrome_csv(rows)).encode("utf-8"))
+    data.name = f"monochrome_{datetime.now():%Y-%m-%d_%H%M}.csv"
+    await update.message.reply_document(document=data, filename=data.name)
+
+
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /forceupdate         — пересчитать цены сразу для ВСЕХ аккаунтов (кроме тех, что на паузе)
@@ -1034,6 +1104,7 @@ BOT_COMMANDS = [
     ("filters", "Понятным языком: как сейчас настроен отбор"),
     ("models", "Что автоподбор выбрал и что отсеял"),
     ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
+    ("monochrome", "Пары подарок+фон: где больше всего моделей в один floor"),
     ("forceupdate", "Пересчитать цены сейчас"),
     ("setinterval", "Как часто (в минутах) проверяются цены"),
     ("pause", "Остановить конкретный аккаунт"),
@@ -1073,6 +1144,7 @@ def main():
     app.add_handler(CommandHandler("setpremium", cmd_setpremium))
     app.add_handler(CommandHandler("setpumptol", cmd_setpumptol))
     app.add_handler(CommandHandler("setpercentile", cmd_setpercentile))
+    app.add_handler(CommandHandler("monochrome", cmd_monochrome))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))

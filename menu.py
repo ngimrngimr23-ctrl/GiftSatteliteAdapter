@@ -231,6 +231,40 @@ def models_summary_text(accounts: list) -> str:
     return "\n".join(lines)
 
 
+def monochrome_text(rows: list, limit: int = 20) -> str:
+    """Верх рейтинга пар подарок+фон — тем же текстом, что уходит в подпись к файлу."""
+    if not rows:
+        return "Монохромов не пришло — проверь ключ и фильтры."
+    lines = [f"🎨 Пары подарок+фон: сколько моделей влезет в один заказ",
+             f"(всего пар {len(rows)}, показываю {min(limit, len(rows))})", ""]
+    for r in rows[:limit]:
+        good = r["high"] + r["combo"]
+        lines.append(f"• {r['gift']} + {r['backdrop']} — моделей {len(r['models'])}"
+                     f" (удачных сочетаний {good}, экземпляров {r['supply']})")
+    best = rows[0]
+    lines += ["", f"Лучшая пара: {best['gift']} + {best['backdrop']}, "
+                  f"{len(best['models'])} моделей в один floor.",
+              "Список моделей для modelNames — в файле, последняя колонка."]
+    return "\n".join(lines)
+
+
+def monochrome_csv(rows: list) -> str:
+    """Тот же рейтинг файлом: модели перечислены, чтобы копировать в подписку."""
+    out = ["подарок;фон;моделей;удачных сочетаний;high;combo;medium;low;"
+           "экземпляров всего;модели"]
+    for r in rows:
+        out.append(";".join([
+            r["gift"].replace(";", ","),
+            r["backdrop"].replace(";", ","),
+            str(len(r["models"])),
+            str(r["high"] + r["combo"]),
+            str(r["high"]), str(r["combo"]), str(r["medium"]), str(r["low"]),
+            str(r["supply"]),
+            ", ".join(r["models"]).replace(";", ","),
+        ]))
+    return "\n".join(out)
+
+
 def refresh_summary_text(acc) -> str:
     """
     Итог пересмотра моделей: по каждому заказу видно, что именно изменилось —
