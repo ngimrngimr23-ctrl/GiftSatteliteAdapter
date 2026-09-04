@@ -64,7 +64,13 @@ BROWSER_HEADERS = {
 
 class WikiClient:
     def __init__(self, api_key: str, base_url: str | None = None):
-        self.api_key = api_key
+        # Значение приезжает из переменной окружения, куда легко попадают
+        # кавычки, пробелы и перенос строки — сервис на такой ключ отвечает
+        # 401, и по сообщению это неотличимо от неверного ключа.
+        self.api_key = (api_key or "").strip().strip('"').strip("'")
+        # Доки принимают две формы авторизации. Начинаем с X-API-Key, при 401
+        # один раз пробуем вторую и дальше держимся той, что сработала.
+        self.auth_style = "x-api-key"
         # берём модульный BASE_URL в момент вызова, а не при импорте:
         # так адрес можно подменить в тестах, не трогая сигнатуру
         self.base_url = (base_url or BASE_URL).rstrip("/")
@@ -81,8 +87,14 @@ class WikiClient:
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
+        return self._send(url, self.auth_style, retry_auth=True)
+
+    def _send(self, url: str, style: str, retry_auth: bool = False):
         req = urllib.request.Request(url)
-        req.add_header("X-API-Key", self.api_key)
+        if style == "x-api-key":
+            req.add_header("X-API-Key", self.api_key)
+        else:
+            req.add_header("Authorization", f"ApiKey {self.api_key}")
         for header, value in BROWSER_HEADERS.items():
             req.add_header(header, value)
         try:
@@ -97,6 +109,17 @@ class WikiClient:
                     f"{CF_MEANING.get(code, 'Cloudflare отклонил запрос')} "
                     f"(код {code}, HTTP {e.code})")
             detail = body[:200]
+            if e.code == 401 and retry_auth:
+                other = "authorization" if style == "x-api-key" else "x-api-key"
+                log.info("giftwiki: 401 на %s, пробую %s", style, other)
+                result = self._send(url, other)   # ошибка второй формы уйдёт наверх как есть
+                self.auth_style = other
+                return result
+            if e.code == 401:
+                raise WikiError(
+                    "ключ не принят (401). Проверь, что в WIKI_API_KEY лежит именно "
+                    "ключ giftwiki со скоупом collection:read, без кавычек и пробелов, "
+                    f"и что он не отозван. Ответ сервиса: {detail}")
             if e.code == 403:
                 raise WikiForbidden(detail)
             raise WikiError(f"HTTP {e.code}: {detail}")
