@@ -878,6 +878,10 @@ async def cmd_monochrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def work():
         try:
             return monochrome.fetch(WIKI_API_KEY, gifts=gifts or None, types=types), None
+        except monochrome.WikiBlocked as e:
+            # запрос завернул Cloudflare, до API он не дошёл — другой способ
+            # обхода тут не поможет, повторять смысла нет
+            return None, f"blocked:{e}"
         except monochrome.WikiForbidden as e:
             # ключу приложения фильтр по названию подарка недоступен — идём постранично
             if gifts:
@@ -891,6 +895,13 @@ async def cmd_monochrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     result, note = await asyncio.to_thread(work)
     if result is None:
+        if note and note.startswith("blocked:"):
+            await update.message.reply_text(
+                f"Запрос не дошёл до giftwiki: {note[len('blocked:'):]}\n\n"
+                "Это защита перед их API, а не проблема ключа. Если повторяется — "
+                "значит, они не пускают запросы с сервера Render."
+            )
+            return
         await update.message.reply_text(f"giftwiki не ответил: {note}")
         return
     records, client = result

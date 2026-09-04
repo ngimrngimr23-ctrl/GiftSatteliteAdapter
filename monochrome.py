@@ -12,6 +12,7 @@
 import collections
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -30,7 +31,35 @@ class WikiError(Exception):
 
 
 class WikiForbidden(WikiError):
-    """403 — ключу приложения недоступны фильтры gift_id/gift_name."""
+    """403 от самого API — ключу недоступны фильтры gift_id/gift_name."""
+
+
+class WikiBlocked(WikiError):
+    """
+    Запрос до API не дошёл: его завернул Cloudflare. Отдаётся тоже с кодом 403,
+    поэтому без разбора тела это неотличимо от нехватки прав у ключа — а лечится
+    совсем иначе, и повтор другим способом обхода бессмысленен.
+    """
+
+
+# Cloudflare пишет свой код в тело страницы: "error code: 1010".
+# 1010 — забракована сигнатура клиента (для нас это User-Agent от urllib),
+# 1020 — сработало правило доступа, 1015 — превышен лимит запросов.
+CF_ERROR = re.compile(r"error code:\s*(\d{4})")
+CF_MEANING = {
+    "1010": "Cloudflare забраковал сигнатуру клиента",
+    "1015": "Cloudflare ограничил частоту запросов",
+    "1020": "Cloudflare заблокировал по своему правилу доступа",
+}
+
+# Без похожего на браузер набора заголовков Cloudflare отвечает 1010 и запрос
+# до API не доходит вовсе.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class WikiClient:
@@ -54,11 +83,20 @@ class WikiClient:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
         req = urllib.request.Request(url)
         req.add_header("X-API-Key", self.api_key)
+        for header, value in BROWSER_HEADERS.items():
+            req.add_header(header, value)
         try:
             with urllib.request.urlopen(req, timeout=40) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:200]
+            body = e.read().decode(errors="replace")
+            found = CF_ERROR.search(body)
+            if found:
+                code = found.group(1)
+                raise WikiBlocked(
+                    f"{CF_MEANING.get(code, 'Cloudflare отклонил запрос')} "
+                    f"(код {code}, HTTP {e.code})")
+            detail = body[:200]
             if e.code == 403:
                 raise WikiForbidden(detail)
             raise WikiError(f"HTTP {e.code}: {detail}")
