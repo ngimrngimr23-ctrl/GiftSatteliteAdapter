@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import logging
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
@@ -13,7 +14,7 @@ from telegram import BotCommand, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 import menu
-from api_client import GiftApiClient
+from api_client import GiftApiClient, HISTORY_PAGE_SIZE
 from state import (AccountState, load_persisted, save_persisted, load_global_settings,
                    save_global_settings, storage_status)
 from updater import run_cycle
@@ -120,6 +121,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/excludebackdrops <фон, фон> — не учитывать продажи этих фонов при расчёте цены\n"
         "/filters — понятным языком объяснить, как сейчас настроен отбор\n"
         "/models — что автоподбор выбрал и что отсеял в последний пересмотр\n"
+        "/sales <коллекция>, <модель> — сами сделки, по которым бот оценил модель\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
         "/monochrome [подарок] — пары подарок+фон: где больше всего моделей влезает в один заказ\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -925,6 +927,77 @@ async def cmd_monochrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(document=data, filename=data.name)
 
 
+async def cmd_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /sales <коллекция>, <модель> — показать сами сделки, по которым бот оценил
+    модель: дата, цена, фон, маркет и пометка, почему сделка не пошла в расчёт.
+
+    В /models лежат только итоговые проценты, поэтому расхождение оценки с
+    рынком по нему не разобрать — эта команда показывает исходные данные.
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+    raw = " ".join(rest)
+    if "," not in raw:
+        await update.message.reply_text(
+            "Использование: /sales <коллекция>, <модель>\n"
+            "Например: /sales Love Candle, Gray Smoke\n\n"
+            "Запятая обязательна — в названиях есть пробелы."
+        )
+        return
+    collection, _, model = raw.partition(",")
+    collection, model = collection.strip(), model.strip()
+    acc = targets[0]
+
+    await update.message.reply_text(f"[{acc.name}] тяну сделки {collection} / {model}...")
+
+    def work():
+        # мимо кеша: смысл команды в том, чтобы увидеть, что сервис отдаёт прямо сейчас
+        pages = max(1, -(-acc.sales_depth // HISTORY_PAGE_SIZE))
+        sales, meta = [], {}
+        for page in range(pages):
+            data = acc.client.get_history(collection, models=[model], sort_by="date", page=page)
+            content = (data or {}).get("content") or []
+            if page == 0:
+                meta = (data or {}).get("page") or {}
+            sales += content
+            total_pages = ((data or {}).get("page") or {}).get("totalPages")
+            if not content or (total_pages is not None and page + 1 >= total_pages):
+                break
+        return sales, meta
+
+    try:
+        sales, meta = await asyncio.to_thread(work)
+    except Exception as e:
+        await update.message.reply_text(f"Не получилось: {e}")
+        return
+    if not sales:
+        await update.message.reply_text(
+            "Сервис не вернул ни одной продажи. Проверь названия — они должны "
+            "совпадать с теми, что в /models, вплоть до регистра."
+        )
+        return
+
+    text = menu.sales_dump_text(collection, model, sales, meta,
+                                set(acc.exclude_backdrops), acc.fresh_hours,
+                                time.time(), acc.ref_percentile)
+    if len(text) < 3500:
+        await update.message.reply_text(text)
+    else:
+        data = BytesIO(("\ufeff" + text).encode("utf-8"))
+        data.name = f"sales_{model.replace(' ', '_')}_{datetime.now():%Y-%m-%d_%H%M}.txt"
+        await update.message.reply_document(document=data, filename=data.name)
+
+
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /forceupdate         — пересчитать цены сразу для ВСЕХ аккаунтов (кроме тех, что на паузе)
@@ -1114,6 +1187,7 @@ BOT_COMMANDS = [
     ("excludebackdrops", "Не учитывать продажи этих фонов при расчёте цены"),
     ("filters", "Понятным языком: как сейчас настроен отбор"),
     ("models", "Что автоподбор выбрал и что отсеял"),
+    ("sales", "Сами сделки по модели: /sales <коллекция>, <модель>"),
     ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
     ("monochrome", "Пары подарок+фон: где больше всего моделей в один floor"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -1156,6 +1230,7 @@ def main():
     app.add_handler(CommandHandler("setpumptol", cmd_setpumptol))
     app.add_handler(CommandHandler("setpercentile", cmd_setpercentile))
     app.add_handler(CommandHandler("monochrome", cmd_monochrome))
+    app.add_handler(CommandHandler("sales", cmd_sales))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))

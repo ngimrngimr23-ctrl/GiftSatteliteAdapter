@@ -265,6 +265,60 @@ def monochrome_csv(rows: list) -> str:
     return "\n".join(out)
 
 
+def sales_dump_text(collection: str, model: str, sales: list, meta: dict,
+                    excluded_backdrops: set, fresh_hours: float, now: float,
+                    ref_percentile: float) -> str:
+    """
+    Сырые сделки построчно: дата, цена, фон, маркет — и пометка, почему сделка
+    не пошла в расчёт. Нужна, чтобы сверять оценку бота с тем, что человек
+    видит на рынке: в обычном отчёте лежат только итоговые проценты, а по ним
+    расхождение вида «у тебя 11,54, а на рынке 8» не разобрать.
+    """
+    from model_picker import parse_sold_at, percentile
+
+    excluded = {b.strip().lower() for b in (excluded_backdrops or set()) if b.strip()}
+    lines = [f"📒 {collection} / {model}", ""]
+
+    total = (meta or {}).get("totalElements")
+    pages = (meta or {}).get("totalPages")
+    lines.append(f"Сервис сообщает: всего продаж {total}, страниц {pages}; "
+                 f"скачано {len(sales)}")
+    if pages == 1 and total is not None and total <= len(sales):
+        lines.append("→ глубже сервис не отдаёт, это весь доступный хвост")
+    lines.append("")
+
+    used = []
+    for sale in sorted(sales, key=lambda s: parse_sold_at(s.get("soldAt")) or 0, reverse=True):
+        price = sale.get("normalizedPrice")
+        backdrop = (sale.get("backdropName") or "").strip()
+        ts = parse_sold_at(sale.get("soldAt"))
+        mark = ""
+        if price is None:
+            mark = "нет цены"
+        elif excluded and backdrop.lower() in excluded:
+            mark = "ПРОПУЩЕНА: фон исключён"
+        elif ts is not None and now - ts < fresh_hours * 3600:
+            mark = "ПРОПУЩЕНА: моложе суток"
+        else:
+            used.append(price)
+        when = (sale.get("soldAt") or "")[:16].replace("T", " ")
+        ago = f"{(now - ts) / 3600:.0f}ч назад" if ts else "?"
+        lines.append(f"{when}  {ago:>10}  {price:>9}  {backdrop[:14]:<14} "
+                     f"{(sale.get('market') or '')[:8]:<8} {mark}")
+
+    lines += ["", f"В расчёт пошло {len(used)} из {len(sales)}"]
+    if used:
+        lines.append(f"p20 {percentile(used, 20):.2f} · p50 {percentile(used, 50):.2f} · "
+                     f"p80 {percentile(used, 80):.2f} · "
+                     f"опорная (p{ref_percentile:g}) {percentile(used, ref_percentile):.2f}")
+        skipped = [p for p in
+                   [s.get("normalizedPrice") for s in sales if s.get("normalizedPrice")]
+                   if p not in used]
+        if skipped:
+            lines.append(f"Отброшенные сделки: {', '.join(f'{p:g}' for p in sorted(skipped))}")
+    return "\n".join(lines)
+
+
 def refresh_summary_text(acc) -> str:
     """
     Итог пересмотра моделей: по каждому заказу видно, что именно изменилось —
