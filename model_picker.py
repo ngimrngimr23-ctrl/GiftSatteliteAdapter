@@ -62,6 +62,29 @@ def share_above(prices: list, level: float) -> float | None:
     return sum(1 for p in prices if p > level) / len(prices) * 100
 
 
+def sale_is_eligible(sale: dict, excluded: set, fresh_hours: float, now: float) -> str | None:
+    """
+    Годится ли продажа для расчёта. Возвращает None, если годится, иначе причину.
+
+    Вынесено отдельно, потому что тот же отбор нужен ещё на этапе скачивания:
+    иначе выборка тает — у ходовой модели свежие сутки съедают почти всё, и
+    решение принимают три случайные сделки (живой случай: 3 из 20).
+    """
+    if sale.get("normalizedPrice") is None:
+        return "нет цены"
+    backdrop = (sale.get("backdropName") or "").strip().lower()
+    if excluded and backdrop in excluded:
+        return "фон исключён"
+    sold_ts = parse_sold_at(sale.get("soldAt"))
+    if sold_ts is not None and now - sold_ts < fresh_hours * 3600:
+        return "моложе окна свежести"
+    return None
+
+
+def count_eligible(sales: list, excluded: set, fresh_hours: float, now: float) -> int:
+    return sum(1 for s in sales if sale_is_eligible(s, excluded, fresh_hours, now) is None)
+
+
 def parse_sold_at(value) -> float | None:
     """soldAt приходит как ISO 8601 с 'Z' — переводим в unix-время."""
     if not isinstance(value, str) or not value:
@@ -113,18 +136,13 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
     fresh_skipped = 0
     backdrop_skipped = 0
     for sale in sales:
-        price = sale.get("normalizedPrice")
-        if price is None:
-            continue
-        backdrop = (sale.get("backdropName") or "").strip().lower()
-        if excluded and backdrop in excluded:
+        reason = sale_is_eligible(sale, excluded, fresh_hours, now)
+        if reason == "фон исключён":
             backdrop_skipped += 1
-            continue
-        sold_ts = parse_sold_at(sale.get("soldAt"))
-        if sold_ts is not None and now - sold_ts < fresh_hours * 3600:
+        elif reason == "моложе окна свежести":
             fresh_skipped += 1
-            continue
-        prices.append(price)
+        elif reason is None:
+            prices.append(sale["normalizedPrice"])
 
     if len(prices) < min_sales:
         return {"verdict": "no_data", "ref_price": None, "inflated": False,

@@ -115,6 +115,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setpumptol <%> — насколько цена может превышать обычную цену модели, прежде чем это памп\n"
         "/setpercentile <n> — какую долю самых дешёвых продаж не брать в расчёт (1-50, сейчас 20)\n"
         "/setsalesdepth <n> — сколько последних продаж смотреть (20/40/100)\n"
+        "/setfresh <часов> — сколько последних часов не брать в расчёт\n"
+        "/setminsales <n> — минимум сделок, без которых модель не оценивается\n"
         "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за проход (0 = все) и по скольким маркетам\n"
         "/setmodelsinterval <часы> — как часто пересматривать состав моделей (цены обновляются отдельно и чаще)\n"
         "/refreshmodels — пересмотреть состав моделей прямо сейчас (долго)\n"
@@ -656,6 +658,80 @@ async def cmd_delaccount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_setfresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setfresh [<acc>] <часов> — сколько последних часов не брать в расчёт."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+    if not rest:
+        await update.message.reply_text(
+            "/setfresh [<acc>] <часов>\n\n"
+            "Продажи моложе этого срока не идут в расчёт цены модели. Смысл — "
+            "не дать свежему пампу подтянуть оценку и спрятать себя.\n\n"
+            "Держать сутки имеет смысл только при большой глубине истории. На "
+            "ходовой модели сутки — это почти вся выборка: было, что в расчёт "
+            "проходило 3 сделки из 20. При /setsalesdepth 100 хватает 2-4 часов.\n\n"
+            "0 — не отбрасывать ничего.\n"
+            "Сейчас: " + ", ".join(f"{a.name} {a.fresh_hours:g}ч" for a in targets)
+        )
+        return
+    try:
+        value = float(rest[0].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("Нужно число часов, напр. /setfresh 3")
+        return
+    if not 0 <= value <= 168:
+        await update.message.reply_text("Разумный диапазон — от 0 до 168 часов (неделя).")
+        return
+    for acc in targets:
+        acc.fresh_hours = value
+    save_persisted(accounts)
+    who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    await update.message.reply_text(
+        f"Для {who}: не учитываю продажи моложе {value:g}ч.\n"
+        "Применится при следующем пересмотре: /refreshmodels"
+    )
+
+
+async def cmd_setminsales(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setminsales [<acc>] <n> — минимум сделок, без которых модель не оценивается."""
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    targets, rest, unknown = _split_acc_args(accounts, context.args)
+    if unknown:
+        await _unknown_account_reply(update, accounts)
+        return
+    if not rest:
+        await update.message.reply_text(
+            "/setminsales [<acc>] <n>\n\n"
+            "Если после всех отбрасываний пригодных сделок меньше этого числа, "
+            "модель не берётся: оценивать не по чему.\n\n"
+            "Сейчас: " + ", ".join(f"{a.name} {a.min_sales}" for a in targets)
+        )
+        return
+    try:
+        value = int(rest[0])
+    except ValueError:
+        await update.message.reply_text("Нужно целое число, напр. /setminsales 10")
+        return
+    if not 1 <= value <= 100:
+        await update.message.reply_text("Разумный диапазон — от 1 до 100.")
+        return
+    for acc in targets:
+        acc.min_sales = value
+    save_persisted(accounts)
+    who = targets[0].name if len(targets) == 1 else f"всех аккаунтов ({len(targets)})"
+    await update.message.reply_text(
+        f"Для {who}: минимум {value} сделок для оценки модели.\n"
+        "Применится при следующем пересмотре: /refreshmodels"
+    )
+
+
 async def cmd_excludebackdrops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/excludebackdrops [<acc>] <фон, фон> — не учитывать продажи этих фонов в медиане."""
     if not authorized(update):
@@ -665,10 +741,15 @@ async def cmd_excludebackdrops(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Нет ни одного аккаунта")
         return
 
-    targets, rest, unknown = _split_acc_args(accounts, context.args)
-    if unknown:
-        await _unknown_account_reply(update, accounts)
-        return
+    # Названия фонов состоят из слов ("Onyx Black"), поэтому общий разбор
+    # '<acc> <аргументы>' здесь ломался: первое слово принималось за имя
+    # аккаунта и команда падала с "Аккаунт не найден". Аккаунт — только точное
+    # совпадение; без него настройка применяется ко всем аккаунтам.
+    args = list(context.args)
+    if args and args[0] in accounts:
+        targets, rest = [accounts[args[0]]], args[1:]
+    else:
+        targets, rest = list(accounts.values()), args
 
     if not rest:
         lines = ["Фоны, чьи продажи не идут в расчёт цены:"]
@@ -676,8 +757,10 @@ async def cmd_excludebackdrops(update: Update, context: ContextTypes.DEFAULT_TYP
             lines.append(f"[{acc.name}] " + (", ".join(acc.exclude_backdrops) or "— пусто, учитываются все"))
         lines.append("\nЗадать: /excludebackdrops Onyx Black, Deep Purple")
         lines.append("Очистить: /excludebackdrops -")
-        lines.append("\nНужно редко: медиана и так не реагирует на пару дорогих продаж, "
-                     "перекос заметен только когда такой фон занимает около половины сделок.")
+        lines.append("\nБез имени аккаунта настройка применяется сразу ко всем.")
+        lines.append("Учтите: это влияет ТОЛЬКО на проверку моделей по истории продаж. "
+                     "На расчёт цены не влияет, и на заказы с фонами тоже — они "
+                     "через подбор моделей не проходят.")
         await update.message.reply_text("\n".join(lines))
         return
 
@@ -1187,6 +1270,8 @@ BOT_COMMANDS = [
     ("setpumptol", "Допуск: насколько цена может превышать обычную цену"),
     ("setpercentile", "Какую долю дешёвых продаж не брать в расчёт"),
     ("setsalesdepth", "Сколько последних продаж смотреть (20/40/100)"),
+    ("setfresh", "Сколько последних часов не брать в расчёт"),
+    ("setminsales", "Минимум сделок для оценки модели"),
     ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
     ("setmodelsinterval", "Как часто пересматривать состав моделей"),
     ("refreshmodels", "Пересмотреть состав моделей прямо сейчас"),
@@ -1237,6 +1322,8 @@ def main():
     app.add_handler(CommandHandler("setpercentile", cmd_setpercentile))
     app.add_handler(CommandHandler("monochrome", cmd_monochrome))
     app.add_handler(CommandHandler("sales", cmd_sales))
+    app.add_handler(CommandHandler("setfresh", cmd_setfresh))
+    app.add_handler(CommandHandler("setminsales", cmd_setminsales))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))

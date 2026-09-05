@@ -4,12 +4,18 @@ import statistics
 import threading
 
 from api_client import ApiError, HISTORY_PAGE_SIZE
-from model_picker import check_pump, has_suspect_chars, pick_candidates, trim_to_limit
+from model_picker import count_eligible, check_pump, has_suspect_chars, pick_candidates, trim_to_limit
 
 log = logging.getLogger("updater")
 
 MARKETS = ["portals", "tonnel", "mrkt"]  # где смотрим актуальную цену
 MIN_DELTA = 0.02  # не дёргать PUT, если цена изменилась меньше чем на столько TON
+# Во сколько раз разрешено превысить базовое число страниц, добирая сделки
+# взамен отброшенных, и жёсткий потолок. Из отчёта: у половины моделей
+# выбрасывается около 12% выборки — им добор не понадобится вовсе, лишние
+# страницы уйдут только на самые ходовые.
+MAX_PAGE_OVERFETCH = 3
+HISTORY_MAX_PAGES = 15
 HISTORY_CACHE_HOURS = 6.0  # медиана по сотне сделок за час не меняется — не перезапрашиваем каждый цикл
 PROBE_CACHE_HOURS = 6.0  # хватает, чтобы все аккаунты в рамках одного прохода взяли цены из кеша
 
@@ -217,13 +223,28 @@ def _fetch_sales(client, collection: str, model: str, depth: int, account, now: 
     практически не меняется, а перезапрос стоил бы по 5 запросов на модель
     каждый цикл.
     """
+    excluded = {b.strip().lower() for b in account.exclude_backdrops if b.strip()}
+    fresh_hours = account.fresh_hours
+
     cached = _HISTORY_CACHE.get((collection, model))
     if cached and now - cached[0] < HISTORY_CACHE_HOURS * 3600:
-        return cached[1]
+        _, cached_sales, exhausted = cached
+        # кеш годится, если в нём уже набирается нужное число ПРИГОДНЫХ сделок
+        # либо история кончилась — иначе аккаунт с другими настройками свежести
+        # получил бы чужую, слишком короткую выборку
+        if exhausted or count_eligible(cached_sales, excluded, fresh_hours, now) >= depth:
+            return cached_sales
 
-    sales = []
-    pages = max(1, -(-depth // HISTORY_PAGE_SIZE))  # ceil
-    for page in range(pages):
+    # Страниц берём столько, сколько нужно для depth ПРИГОДНЫХ сделок, а не
+    # depth скачанных. У ходовой модели свежие сутки съедают почти всю выборку
+    # (живой случай: из 20 сделок в расчёт прошли 3), и решение принимали
+    # случайные остатки. Потолок нужен, чтобы одна быстрая модель не съела
+    # весь цикл.
+    base_pages = max(1, -(-depth // HISTORY_PAGE_SIZE))  # ceil
+    max_pages = min(base_pages * MAX_PAGE_OVERFETCH, HISTORY_MAX_PAGES)
+
+    sales, exhausted, page = [], False, 0
+    while page < max_pages:
         try:
             data = client.get_history(collection, models=[model], sort_by="date", page=page)
         except ApiError as e:
@@ -232,11 +253,22 @@ def _fetch_sales(client, collection: str, model: str, depth: int, account, now: 
         content = (data or {}).get("content") or []
         sales.extend(content)
         total_pages = ((data or {}).get("page") or {}).get("totalPages")
-        if not content or (total_pages is not None and page + 1 >= total_pages):
+        page += 1
+        if not content or (total_pages is not None and page >= total_pages):
+            exhausted = True
+            break
+        if count_eligible(sales, excluded, fresh_hours, now) >= depth:
             break
 
-    sales = sales[:depth]
-    _HISTORY_CACHE[(collection, model)] = (now, sales)
+    got = count_eligible(sales, excluded, fresh_hours, now)
+    if page > base_pages:
+        log.info("[%s/%s] добрал до %d страниц: пригодных сделок %d из %d скачанных",
+                 collection, model, page, got, len(sales))
+    if got < depth and not exhausted:
+        log.info("[%s/%s] пригодных сделок только %d из %d — упёрлись в потолок страниц",
+                 collection, model, got, depth)
+
+    _HISTORY_CACHE[(collection, model)] = (now, sales, exhausted)
     return sales
 
 
