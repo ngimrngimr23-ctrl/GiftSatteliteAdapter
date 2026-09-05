@@ -942,21 +942,27 @@ async def cmd_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет ни одного аккаунта")
         return
 
-    targets, rest, unknown = _split_acc_args(accounts, context.args)
-    if unknown:
-        await _unknown_account_reply(update, accounts)
-        return
-    raw = " ".join(rest)
+    # Здесь общий разбор '<acc> <аргументы>' не годится: названия коллекций
+    # состоят из слов ("Love Candle"), и первое слово принималось за имя
+    # аккаунта. Аккаунтом считаем только точное совпадение с известным именем.
+    args = list(context.args)
+    if args and args[0] in accounts:
+        acc, args = accounts[args[0]], args[1:]
+    else:
+        # история одна на сервис, токен любого аккаунта её отдаст
+        acc = next((a for a in accounts.values() if not a.paused), None) or \
+            next(iter(accounts.values()))
+    raw = " ".join(args)
     if "," not in raw:
         await update.message.reply_text(
-            "Использование: /sales <коллекция>, <модель>\n"
+            "Использование: /sales [<acc>] <коллекция>, <модель>\n"
             "Например: /sales Love Candle, Gray Smoke\n\n"
-            "Запятая обязательна — в названиях есть пробелы."
+            "Запятая обязательна — в названиях есть пробелы. "
+            "Имя аккаунта в начале необязательно: история одна на сервис."
         )
         return
     collection, _, model = raw.partition(",")
     collection, model = collection.strip(), model.strip()
-    acc = targets[0]
 
     await update.message.reply_text(f"[{acc.name}] тяну сделки {collection} / {model}...")
 
