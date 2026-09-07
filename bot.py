@@ -768,6 +768,8 @@ async def cmd_refreshmodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
             await update.message.reply_text(text[i:i + 4000])
     save_persisted(accounts)
+    # полный разбор отбора сразу следом, чтобы не нажимать /models руками
+    await _send_models_report(context.bot, update.effective_chat.id, work)
 
 
 async def cmd_restoremodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -831,6 +833,24 @@ def _restore_models(acc):
     return restored, failed
 
 
+async def _send_models_report(bot, chat_id: int, targets: list):
+    """
+    Сводка по отбору плюс файл — ровно то, что отдаёт /models. Вынесено, чтобы
+    отчёт после пересмотра приходил сам, а не только по ручной команде, и был
+    при этом тем же самым, а не отдельной урезанной версией.
+    """
+    text = menu.models_summary_text(targets)
+    for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
+        await bot.send_message(chat_id=chat_id, text=text[i:i + 4000])
+    if not any(acc.last_models for acc in targets):
+        return
+    # \ufeff в начале — иначе Excel открывает кириллицу кракозябрами
+    data = BytesIO(("\ufeff" + menu.models_report_csv(targets)).encode("utf-8"))
+    scope = targets[0].name if len(targets) == 1 else "all"
+    data.name = f"models_{scope}_{datetime.now():%Y-%m-%d_%H%M}.csv"
+    await bot.send_document(chat_id=chat_id, document=data, filename=data.name)
+
+
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/models [<acc>] — что автоподбор выбрал и что отсеял в последнем цикле."""
     if not authorized(update):
@@ -846,14 +866,7 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # одна сводка и один файл на все аккаунты, а не по паре сообщений на каждый
-    await update.message.reply_text(menu.models_summary_text(targets))
-    if not any(acc.last_models for acc in targets):
-        return
-    # \ufeff в начале — иначе Excel открывает кириллицу кракозябрами
-    data = BytesIO(("\ufeff" + menu.models_report_csv(targets)).encode("utf-8"))
-    scope = targets[0].name if len(targets) == 1 else "all"
-    data.name = f"models_{scope}_{datetime.now():%Y-%m-%d_%H%M}.csv"
-    await update.message.reply_document(document=data, filename=data.name)
+    await _send_models_report(context.bot, update.effective_chat.id, targets)
 
 
 async def cmd_monochrome(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1149,10 +1162,41 @@ async def cmd_setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def scheduled_cycle(context: ContextTypes.DEFAULT_TYPE):
     accounts = context.job.data["accounts"]
+    # Пересмотр моделей идёт раз в models_interval_h и попадает не в каждый
+    # цикл. Ловим его по last_models_ts: если отметка сдвинулась, состав
+    # пересматривали — и отчёт нужно прислать, не дожидаясь ручного /models.
+    refreshed = []
     for acc in accounts.values():
         if acc.paused:
             continue
+        before = acc.last_models_ts
         await asyncio.to_thread(run_cycle, acc)
+        if acc.last_models_ts != before:
+            refreshed.append(acc)
+
+    if not refreshed:
+        return
+    save_persisted(accounts)
+    if not ALLOWED_CHAT_IDS:
+        # слать некуда: чат не задан, и рассылать кому попало нельзя
+        log.info("состав моделей пересмотрен (%s), но ALLOWED_CHAT_IDS пуст — "
+                 "отчёт не отправляю, он доступен по /models",
+                 ", ".join(a.name for a in refreshed))
+        return
+    for chat_id in ALLOWED_CHAT_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔄 Плановый пересмотр состава моделей: "
+                     + ", ".join(a.name for a in refreshed))
+            for acc in refreshed:
+                text = menu.refresh_summary_text(acc)
+                for i in range(0, len(text), 4000):
+                    await context.bot.send_message(chat_id=chat_id, text=text[i:i + 4000])
+            await _send_models_report(context.bot, chat_id, refreshed)
+        except Exception as e:
+            # упавшая отправка не должна ронять джобу и срывать следующий цикл
+            log.warning("не смог отправить отчёт в чат %s: %s", chat_id, e)
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
