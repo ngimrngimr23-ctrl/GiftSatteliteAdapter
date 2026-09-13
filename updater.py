@@ -196,20 +196,46 @@ def _probe_model_floors(client, collection: str, known: dict, account, catalog: 
         names = names[:account.probe_limit]
     log.info("[%s] доуточняю цены %d моделей по %d маркет(ам)", collection, len(names), len(MARKETS[:max(1, account.probe_markets)]))
 
-    markets = MARKETS[:max(1, account.probe_markets)]
+    primary = MARKETS[:max(1, account.probe_markets)]
+    # Маркеты, до которых обычный проход не доходит. Модель, выставленная только
+    # на них, раньше просто исчезала: цены нет — значит нет и строки в отчёте,
+    # и понять, что модель вообще существует, было невозможно. Редкие дорогие
+    # модели попадают сюда чаще прочих — их и продают редко, и лежат они не на
+    # всех площадках сразу.
+    fallback = [m for m in MARKETS if m not in primary]
+
+    def floor_on(market: str, model: str):
+        try:
+            listings = client.search_market(market, collection, models=[model])
+        except ApiError as e:
+            account.record_error(f"probe {market}/{collection}/{model}: {e}")
+            return None
+        return listings[0]["normalizedPrice"] if listings else None
+
     floors = {}
+    rescued, missing = [], []
     for name in names:
-        prices = []
-        for market in markets:
-            try:
-                listings = client.search_market(market, collection, models=[name])
-            except ApiError as e:
-                account.record_error(f"probe {market}/{collection}/{name}: {e}")
-                continue
-            if listings:
-                prices.append(listings[0]["normalizedPrice"])
+        prices = [p for p in (floor_on(m, name) for m in primary) if p is not None]
+        if not prices:
+            # добираем по оставшимся маркетам — но только для этой модели и
+            # только пока не найдём хоть один листинг
+            for market in fallback:
+                price = floor_on(market, name)
+                if price is not None:
+                    prices.append(price)
+                    rescued.append(name)
+                    break
         if prices:
             floors[name] = statistics.median(prices)
+        else:
+            missing.append(name)
+
+    if rescued:
+        log.info("[%s] нашлись только на других маркетах (%d): %s",
+                 collection, len(rescued), ", ".join(rescued[:8]))
+    if missing:
+        log.info("[%s] нет активных листингов нигде (%d): %s",
+                 collection, len(missing), ", ".join(missing[:8]))
     return floors
 
 
