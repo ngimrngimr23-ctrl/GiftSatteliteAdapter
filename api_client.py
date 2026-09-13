@@ -1,3 +1,4 @@
+import re
 import time
 import logging
 from urllib.parse import quote
@@ -19,6 +20,23 @@ RETRY_BACKOFF_SECONDS = 2.0  # база линейного бэкоффа: 2с, 
 THROTTLE_STEP = 1.15  # во сколько раз растягиваем паузу после 429
 MAX_THROTTLE = 2.0  # выше этого не поднимаем, иначе проход встанет совсем
 HISTORY_PAGE_SIZE = 20  # жёсткий потолок pageSize у POST /history/:collection
+
+
+def _short_error(resp) -> str:
+    """
+    Короткое описание ошибки вместо тела ответа целиком.
+
+    Когда у сервиса падает бэкенд, Cloudflare отдаёт HTML-страницу на полсотни
+    строк, и она целиком уезжала и в лог, и в буфер ошибок, и в /errors —
+    прочитать там что-либо было невозможно. Осмысленное содержимое такой
+    страницы — ровно её заголовок.
+    """
+    body = (resp.text or "").strip()
+    if body[:1] == "<" or "text/html" in (resp.headers.get("Content-Type") or ""):
+        found = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
+        title = found.group(1).strip() if found else f"HTTP {resp.status_code}"
+        return f"{title} (страница-заглушка, сервис недоступен)"
+    return body[:800]
 
 
 class ApiError(Exception):
@@ -69,7 +87,7 @@ class GiftApiClient:
             # логируем тело запроса, которое вызвало ошибку — помогает найти,
             # какое поле не проходит валидацию на бэкенде
             log.error("Request body that failed (%s %s): %s", method, path, kwargs.get("json"))
-            raise ApiError(f"{method} {path} -> {resp.status_code}: {resp.text[:800]}")
+            raise ApiError(f"{method} {path} -> {resp.status_code}: {_short_error(resp)}")
 
         if resp.status_code == 204 or not resp.content:
             return None
