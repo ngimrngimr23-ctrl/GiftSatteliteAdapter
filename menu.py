@@ -338,6 +338,12 @@ def refresh_summary_text(acc) -> str:
     if empty:
         lines.append(f"⚠️ у {empty} {plural(empty, 'заказа', 'заказов', 'заказов')} "
                      f"отбор пустой, состав не тронут")
+    # заказы, где часть запросов упала: состав намеренно оставлен прежним,
+    # иначе модели без цены вычеркнулись бы из живого заказа
+    flaky = sum(1 for r in acc.last_models.values() if r.get("errors"))
+    if flaky:
+        lines.append(f"⚠️ у {flaky} {plural(flaky, 'заказа', 'заказов', 'заказов')} "
+                     f"были сбои запросов — состав не тронут, чтобы не потерять модели")
     lines.append(f"Запросов {acc.last_requests}, ошибок {len(acc.errors)}")
     return "\n".join(lines)
 

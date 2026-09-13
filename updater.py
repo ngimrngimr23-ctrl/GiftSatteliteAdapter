@@ -488,7 +488,9 @@ def _run_cycle_locked(account, force_models: bool):
             if _is_fon_order(sub):
                 continue  # фоны не трогаем: их листинги отфильтрованы по backdropNames
             name = sub.get("subscriptionName", sub["_id"])
+            errors_before = account.error_count
             report = _select_models(client, sub, floor, model_floors, account, now, new_price)
+            report["errors"] = account.error_count - errors_before
             report["applied"] = False
             report["collection"] = sub.get("collectionName")
             # что именно изменится в заказе по сравнению с тем, что там стоит сейчас
@@ -508,6 +510,15 @@ def _run_cycle_locked(account, force_models: bool):
                 # поэтому при пустом отборе набор моделей оставляем как есть
                 log.warning("[%s/%s] отбор не дал ни одной модели — modelNames не трогаем",
                             account.name, name)
+                continue
+            if report["errors"]:
+                # Упавший запрос = модель без цены, а модель без цены выпадает из
+                # отбора молча и была бы вычеркнута из живого заказа. При сбое
+                # сервиса так вычёркивается сразу десятками, поэтому состав не
+                # переписываем: устаревший список лучше обрезанного случайно.
+                log.warning("[%s/%s] во время отбора упало запросов: %d — "
+                            "modelNames не трогаю, чтобы не вычеркнуть модели без цены",
+                            account.name, name, report["errors"])
                 continue
             if sorted(report["picked"]) == sorted(sub.get("modelNames") or []):
                 continue  # состав не изменился, PUT не нужен

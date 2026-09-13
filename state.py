@@ -72,9 +72,13 @@ class AccountState:
     last_models: dict = field(default_factory=dict)  # отчёт последнего цикла для /models, не персистится
     original_models: dict = field(default_factory=dict)  # {sub_id: [модели]} до первой перезаписи ботом
     errors: deque = field(default_factory=lambda: deque(maxlen=MAX_ERRORS))
+    error_count: int = 0  # сквозной счётчик за жизнь процесса, не персистится
 
     def record_error(self, message: str):
         self.errors.append((time.time(), message))
+        # deque с maxlen считать нечем — при переполнении длина замирает,
+        # а нам нужно видеть, сколько запросов упало за конкретный участок цикла
+        self.error_count += 1
         log.error("[%s] %s", self.name, message)
 
     def to_persist(self):
