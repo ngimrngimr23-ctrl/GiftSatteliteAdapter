@@ -759,17 +759,31 @@ async def cmd_refreshmodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"Включить: /automodels <acc> preview — или on, чтобы сразу применял.\n" if off else "")
         + "Это надолго — перебираются все модели всех коллекций. Отчёт пришлю по готовности."
     )
+    done = []
     for acc in work:
+        before = acc.last_models_ts
         ran = await asyncio.to_thread(run_cycle, acc, True)
         if not ran:
             await update.message.reply_text(f"[{acc.name}] цикл уже идёт — повтори позже.")
             continue
+        if acc.last_models_ts == before:
+            # цикл оборвался до фазы моделей (обычно упал get_subscriptions).
+            # Старый last_models при этом цел, и отчёт по нему выглядел бы как
+            # свежий результат — поэтому вместо отчёта говорим, что не вышло.
+            last = acc.errors[-1][1] if acc.errors else "причина неизвестна"
+            await update.message.reply_text(
+                f"[{acc.name}] пересмотр не состоялся — сервис не ответил.\n"
+                f"{last[:300]}\n\nЗаказы не тронуты. Повтори, когда сервис поднимется."
+            )
+            continue
+        done.append(acc)
         text = menu.refresh_summary_text(acc)
         for i in range(0, len(text), 4000):  # лимит телеграма на длину сообщения
             await update.message.reply_text(text[i:i + 4000])
     save_persisted(accounts)
     # полный разбор отбора сразу следом, чтобы не нажимать /models руками
-    await _send_models_report(context.bot, update.effective_chat.id, work)
+    if done:
+        await _send_models_report(context.bot, update.effective_chat.id, done)
 
 
 async def cmd_restoremodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
