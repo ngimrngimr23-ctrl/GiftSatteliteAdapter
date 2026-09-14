@@ -92,9 +92,9 @@ def models_report_text(acc) -> str:
         for model in rep["picked"][:15]:
             d = rep["details"][model]
             if d.get("inflated"):
-                # цена задрана, но обычная цена всё равно выше порога — модель законная
-                lines.append(f"  ✅ {model}: сейчас {d['floor']:.2f} (задрана), "
-                             f"обычно уходит за {d['ref_price']:.2f} — всё равно выше порога")
+                # лот задран, но по сделкам модель всё равно дороже порога — берём
+                lines.append(f"  ✅ {model}: сейчас {d['floor']:.2f} (лот задран), "
+                             f"по сделкам {d['ref_price']:.2f} — выше порога")
             else:
                 lines.append(f"  ✅ {model}: {d['floor']:.2f} TON, обычно уходит за "
                              f"{d['ref_price']:.2f} (по {d['used']} сделкам)")

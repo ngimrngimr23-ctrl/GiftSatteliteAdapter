@@ -356,7 +356,7 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
             details[model]["status"] = "взята"
         elif result["verdict"] == "pump":
             pumped.append(model)
-            details[model]["status"] = "отсев: цена задрана, без неё порог не проходит"
+            details[model]["status"] = "отсев: по сделкам порог не проходит"
         else:
             no_data.append(model)
             details[model]["status"] = "отсев: мало сделок для проверки"

@@ -112,7 +112,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/automodels on|off|preview — автоподбор моделей: применять / не считать вовсе / "
         "считать и показывать в /models, ничего не меняя\n"
         "/setpremium <%> — насколько выше floor коллекции должна стоить модель, чтобы попасть в заказ\n"
-        "/setpumptol <%> — насколько цена может превышать обычную цену модели, прежде чем это памп\n"
+        "/setpumptol <%> — пометка «цена задрана» в отчёте; на отбор не влияет\n"
         "/setpercentile <n> — какую долю самых дешёвых продаж не брать в расчёт (1-50, сейчас 20)\n"
         "/setsalesdepth <n> — сколько последних продаж смотреть (20/40/100)\n"
         "/setprobe <лимит> [маркетов] — сколько моделей доуточнять за проход (0 = все) и по скольким маркетам\n"
@@ -152,7 +152,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Наценка (модели): +{acc.markup_pct}%",
             f"Наценка (фоны): +{acc.markup_pct_fon}%",
             f"Автоподбор моделей: {acc.models_mode} "
-            f"(премия от +{acc.premium_pct:g}%, памп при +{acc.tol_pct:g}% над историей)",
+            f"(премия от +{acc.premium_pct:g}% к floor, проверка по реальным сделкам)",
             f"Последний запуск: {fmt_ago(acc.last_run_ts)}",
             f"Обновлено цен: {acc.last_updated_count}, пропущено: {acc.last_skipped_count}",
             f"Запросов к API за цикл: {acc.last_requests}",
@@ -375,7 +375,8 @@ async def cmd_automodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(
                 f"[{acc.name}] режим: {acc.models_mode}\n"
                 f"  премия: модель должна стоить от +{acc.premium_pct:g}% к floor коллекции\n"
-                f"  памп: цена выше медианы продаж более чем на {acc.tol_pct:g}%\n"
+                f"  отсев: по сделкам модель дешевле порога\n"
+                f"  (допуск {acc.tol_pct:g}% на вердикт не влияет, только в отчёте)\n"
                 f"  история: {acc.sales_depth} последних продаж, свежие {acc.fresh_hours:g}ч в базу не идут, "
                 f"минимум {acc.min_sales} сделок\n"
                 f"  добор цен: {'все модели' if not acc.probe_limit else f'до {acc.probe_limit} моделей'} "
@@ -1249,7 +1250,7 @@ BOT_COMMANDS = [
     ("setmarkupfon", "Наценка над floor для заказов на фоны"),
     ("automodels", "Автоподбор моделей: on|off|preview"),
     ("setpremium", "Порог премии модели над floor коллекции"),
-    ("setpumptol", "Допуск: насколько цена может превышать обычную цену"),
+    ("setpumptol", "Пометка «цена задрана» в отчёте, на отбор не влияет"),
     ("setpercentile", "Какую долю дешёвых продаж не брать в расчёт"),
     ("setsalesdepth", "Сколько последних продаж смотреть (20/40/100)"),
     ("setprobe", "Сколько моделей доуточнять за проход и по скольким маркетам"),
