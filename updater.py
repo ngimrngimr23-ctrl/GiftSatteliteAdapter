@@ -374,15 +374,24 @@ def _select_models(client, sub: dict, floor: float, model_floors: dict, account,
     }
 
 
-def run_cycle(account, force_models: bool = False) -> bool:
+def run_cycle(account, force_models: bool = False, wait_seconds: float = 0.0) -> bool:
     """
     account: state.AccountState. Синхронная функция — вызывать через asyncio.to_thread из бота.
 
     Цикл состоит из двух фаз с разной частотой: цены пересчитываются каждый раз
     (быстро), а состав моделей — раз в models_interval_h или по force_models.
     Возвращает False, если цикл пропущен, потому что предыдущий ещё не закончился.
+    wait_seconds > 0 — столько ждать освобождения вместо немедленного отказа.
     """
-    if not _CYCLE_LOCK.acquire(blocking=False):
+    # Плановый запуск при занятой блокировке просто пропускаем — он всё равно
+    # повторится по расписанию. А вот команда от человека ждёт: цикл теперь идёт
+    # минутами, и отказ «повтори позже» приходил почти на каждое нажатие, тем
+    # более что сразу после деплоя плановый цикл стартует через 10 секунд.
+    if wait_seconds > 0:
+        acquired = _CYCLE_LOCK.acquire(timeout=wait_seconds)
+    else:
+        acquired = _CYCLE_LOCK.acquire(blocking=False)
+    if not acquired:
         log.warning("[%s] предыдущий цикл ещё идёт — пропускаю запуск", account.name)
         return False
     try:

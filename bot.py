@@ -32,6 +32,12 @@ TG_BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
 ALLOWED_CHAT_IDS = {int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if x.strip()}
 DEFAULT_CYCLE_SECONDS = int(os.environ.get("CYCLE_SECONDS", 3600))  # используется, только если интервал ещё ни разу не меняли через /setinterval
 MIN_INTERVAL_MINUTES = 1
+# Сколько команда ждёт освобождения цикла, прежде чем сдаться. Пересмотр всех
+# моделей идёт минутами на аккаунт, а плановый цикл стартует через 10 секунд
+# после запуска процесса — без ожидания почти каждое нажатие после деплоя
+# упиралось в «цикл уже идёт».
+REFRESH_WAIT_SECONDS = 900
+FORCEUPDATE_WAIT_SECONDS = 300
 GIFT_API_BASE_URL = os.environ.get("GIFT_API_BASE_URL")
 WIKI_API_KEY = os.environ.get("WIKI_API_KEY")  # giftwiki, скоуп collection:read
 ACCOUNTS_CFG = json.loads(os.environ["ACCOUNTS_JSON"])  # [{"name": "...", "api_token": "..."}, ...]
@@ -763,9 +769,11 @@ async def cmd_refreshmodels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     done = []
     for acc in work:
         before = acc.last_models_ts
-        ran = await asyncio.to_thread(run_cycle, acc, True)
+        ran = await asyncio.to_thread(run_cycle, acc, True, REFRESH_WAIT_SECONDS)
         if not ran:
-            await update.message.reply_text(f"[{acc.name}] цикл уже идёт — повтори позже.")
+            await update.message.reply_text(
+                f"[{acc.name}] предыдущий цикл не закончился за "
+                f"{REFRESH_WAIT_SECONDS // 60} мин — пропускаю. Повтори позже.")
             continue
         if acc.last_models_ts == before:
             # цикл оборвался до фазы моделей (обычно упал get_subscriptions).
@@ -1058,9 +1066,10 @@ async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _unknown_account_reply(update, accounts)
             return
         await update.message.reply_text(f"[{acc.name}] запускаю пересчёт...")
-        ran = await asyncio.to_thread(run_cycle, acc)
+        ran = await asyncio.to_thread(run_cycle, acc, False, FORCEUPDATE_WAIT_SECONDS)
         if not ran:
-            await update.message.reply_text("Цикл уже идёт — дождись его окончания и повтори.")
+            await update.message.reply_text(
+                f"Цикл не освободился за {FORCEUPDATE_WAIT_SECONDS // 60} мин — повтори позже.")
             return
         await update.message.reply_text(
             f"[{acc.name}] готово: обновлено {acc.last_updated_count}, "
@@ -1082,10 +1091,11 @@ async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     ran_any = False
     for acc in active:
-        ran_any |= await asyncio.to_thread(run_cycle, acc)
+        ran_any |= await asyncio.to_thread(run_cycle, acc, False, FORCEUPDATE_WAIT_SECONDS)
 
     if not ran_any:
-        await update.message.reply_text("Цикл уже идёт — дождись его окончания и повтори.")
+        await update.message.reply_text(
+            f"Цикл не освободился за {FORCEUPDATE_WAIT_SECONDS // 60} мин — повтори позже.")
         return
 
     lines = ["✅ Готово:"]
