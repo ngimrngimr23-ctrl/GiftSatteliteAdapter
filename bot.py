@@ -1328,15 +1328,20 @@ def main():
     app.add_handler(CommandHandler("addaccount", cmd_addaccount))
     app.add_handler(CommandHandler("delaccount", cmd_delaccount))
 
+    # Первый цикл — через полный интервал, а не сразу после старта. Иначе каждый
+    # деплой немедленно запускал перебор, и команда, поданная следом, упиралась
+    # в занятую блокировку.
     app.job_queue.run_repeating(
         scheduled_cycle,
         interval=cycle_seconds,
-        first=10,
+        first=cycle_seconds,
         data={"accounts": accounts},
         name=CYCLE_JOB_NAME,
     )
 
-    log.info("Бот запущен, аккаунтов: %d, интервал проверки: %.1f мин.", len(accounts), cycle_seconds / 60)
+    log.info("Бот запущен, аккаунтов: %d, интервал проверки: %.1f мин. "
+             "Первый цикл через %.1f мин.",
+             len(accounts), cycle_seconds / 60, cycle_seconds / 60)
     app.run_polling()
 
 
