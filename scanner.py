@@ -369,8 +369,10 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
     # противоречили друг другу — «пропускаю 15 собранных» и тут же «из базы
     # возьму цены по 15 коллекциям», хотя эти коллекции и не посещаются.
     known = len(saved)
+    offset = 0   # сколько коллекций уже за спиной до начала этого прохода
     if params.only_missing:
         names = [n for n in names if n not in saved]
+        offset = known
         note = (f"Достраиваю базу.\nВ базе уже {known} коллекций — пропускаю их.\n"
                 f"К проходу: {len(names)}.")
     elif known:
@@ -423,11 +425,10 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             if on_finds:
                 on_finds(collection, finds)
         if on_progress and index % 10 == 0:
-            # В режиме missing счёт идёт по оставшимся коллекциям, а не по всему
-            # рынку, и «10 из 116» читалось как откат назад. Показываем оба числа.
-            tail = (f" · по рынку {known + index} из {known + len(names)}"
-                    if params.only_missing and known else "")
-            on_progress(f"Пройдено {index} из {len(names)}{tail}: "
+            # Счёт всегда по рынку целиком: в режиме missing уже собранные
+            # коллекции тоже пройдены, просто раньше, и сбрасывать счётчик на
+            # ноль — значит показывать откат назад.
+            on_progress(f"Пройдено {offset + index} из {offset + len(names)}: "
                         f"разобрано {done}, пропущено по цене {skipped}, "
                         f"находок {len(all_finds)}, запросов {client.request_count}")
 

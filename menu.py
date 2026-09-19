@@ -320,6 +320,20 @@ def sales_dump_text(collection: str, model: str, sales: list, meta: dict,
     return "\n".join(lines)
 
 
+def offer_link(find: dict) -> str:
+    """
+    Ссылка на конкретный лот. Маркет отдаёт прямую ссылку на листинг — она
+    полезнее всего, по ней сразу видно цену и можно купить. Если её нет,
+    собираем ссылку на сам подарок по слагу: слаг вида "PlushPepe-274" — это
+    и есть адрес в t.me/nft.
+    """
+    link = (find.get("link") or "").strip()
+    if link.startswith("http"):
+        return link
+    slug = (find.get("slug") or "").strip()
+    return f"https://t.me/nft/{slug}" if slug else ""
+
+
 def scan_finds_text(collection: str, finds: list, limit: int = 10) -> str:
     """Порция находок по одной коллекции — уходит в чат по ходу прогона."""
     lines = [f"💎 {collection} — находок {len(finds)}"]
@@ -331,6 +345,7 @@ def scan_finds_text(collection: str, finds: list, limit: int = 10) -> str:
             f"(выгода {f['benefit']:.0f}%){tag}\n"
             f"   {f['market']} · {f['rule']}"
             + (f" · сделок/мес {f['per_month']:.0f}" if f.get("per_month") else "")
+            + (f"\n   {offer_link(f)}" if offer_link(f) else "")
         )
     if len(finds) > limit:
         lines.append(f"…и ещё {len(finds) - limit}, все будут в файле")
