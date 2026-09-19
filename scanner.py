@@ -365,18 +365,28 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
     saved = {name: snap for name, snap in stored.items()
              if isinstance(snap, dict)
              and now_ts - snap.get("ts", 0) <= params.baseline_max_age_h * 3600}
+    # Одно сообщение на оба режима: раньше их было два, и в режиме missing они
+    # противоречили друг другу — «пропускаю 15 собранных» и тут же «из базы
+    # возьму цены по 15 коллекциям», хотя эти коллекции и не посещаются.
+    known = len(saved)
     if params.only_missing:
-        before = len(names)
         names = [n for n in names if n not in saved]
+        note = (f"Достраиваю базу.\nВ базе уже {known} коллекций — пропускаю их.\n"
+                f"К проходу: {len(names)}.")
+    elif known:
+        note = (f"Коллекций к проходу: {len(names)}.\n"
+                f"По {known} из них цены возьму из базы — историю заново не собираю, "
+                f"это самая долгая часть.")
+    else:
+        note = (f"Коллекций к проходу: {len(names)}.\n"
+                f"Базы нет, историю собираю с нуля — это долго.")
+    if not names:
         if on_progress:
-            on_progress(f"Достраиваю базу: пропускаю {before - len(names)} уже собранных, "
-                        f"остаётся {len(names)}")
-
+            on_progress(note + "\n\nНовых коллекций нет, проходить нечего.")
+        return {"finds": [], "baseline": {}, "collections": 0,
+                "scanned": 0, "skipped": 0, "requests": client.request_count}
     if on_progress:
-        on_progress(f"Коллекций к проходу: {len(names)}"
-                    + (f"\nИз базы возьму цены по {len(saved)} коллекциям — "
-                       f"историю по ним заново не собираю"
-                       if saved else "\nБазы нет, собираю историю с нуля — это долго"))
+        on_progress(note)
 
     collected, all_finds = {}, []
     done = skipped = 0
