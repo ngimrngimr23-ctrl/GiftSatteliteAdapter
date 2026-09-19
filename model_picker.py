@@ -62,16 +62,26 @@ def share_above(prices: list, level: float) -> float | None:
     return sum(1 for p in prices if p > level) / len(prices) * 100
 
 
+# Площадки, сделки с которых не идут в расчёт цены: комиссия там другая, и
+# цены несопоставимы с остальными. Листинги оттуда покупать ничто не мешает —
+# исключение касается только оценки, сколько модель стоит.
+PRICE_EXCLUDED_MARKETS = frozenset({"telegram", "tg"})
+
+
 def sale_is_eligible(sale: dict, excluded: set, fresh_hours: float, now: float) -> str | None:
     """
     Годится ли продажа для расчёта. Возвращает None, если годится, иначе причину.
 
     Вынесено отдельно, потому что тот же отбор нужен ещё на этапе скачивания:
     иначе выборка тает — у ходовой модели свежие сутки съедают почти всё, и
-    решение принимают три случайные сделки (живой случай: 3 из 20).
+    решение принимают три случайные сделки (живой случай: 3 из 20). По той же
+    причине отсюда же отсекаются исключённые площадки: иначе бот остановил бы
+    набор страниц, посчитав непригодные сделки.
     """
     if sale.get("normalizedPrice") is None:
         return "нет цены"
+    if (sale.get("market") or "").strip().lower() in PRICE_EXCLUDED_MARKETS:
+        return "маркет не учитывается"
     backdrop = (sale.get("backdropName") or "").strip().lower()
     if excluded and backdrop in excluded:
         return "фон исключён"
@@ -96,25 +106,21 @@ def parse_sold_at(value) -> float | None:
 
 
 def sales_stats(sales: list, excluded: set, fresh_hours: float, now: float,
-                ref_percentile: float, exclude_markets=frozenset()) -> dict | None:
+                ref_percentile: float) -> dict | None:
     """
     Сводка по ряду сделок: опорная цена, медиана и ликвидность.
 
     Отдельно от check_pump, потому что сканеру рынка нужен не вердикт, а сами
     числа. Правило пригодности общее — sale_is_eligible.
 
-    exclude_markets выбрасывает сделки с перечисленных площадок целиком.
-    Комиссия там другая, и цены несопоставимы с остальными.
+    Площадки из PRICE_EXCLUDED_MARKETS отсекает sale_is_eligible — правило одно
+    и для сканера, и для отбора моделей.
     """
-    skip = {m.strip().lower() for m in exclude_markets}
     prices, stamps = [], []
     for sale in sales:
         if sale_is_eligible(sale, excluded, fresh_hours, now) is not None:
             continue
-        if skip and (sale.get("market") or "").strip().lower() in skip:
-            continue
-        price = sale["normalizedPrice"]
-        prices.append(price)
+        prices.append(sale["normalizedPrice"])
         sold_ts = parse_sold_at(sale.get("soldAt"))
         if sold_ts is not None:
             stamps.append(sold_ts)
@@ -178,19 +184,22 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
     prices = []
     fresh_skipped = 0
     backdrop_skipped = 0
+    market_skipped = 0
     for sale in sales:
         reason = sale_is_eligible(sale, excluded, fresh_hours, now)
         if reason == "фон исключён":
             backdrop_skipped += 1
         elif reason == "моложе окна свежести":
             fresh_skipped += 1
+        elif reason == "маркет не учитывается":
+            market_skipped += 1
         elif reason is None:
             prices.append(sale["normalizedPrice"])
 
     if len(prices) < min_sales:
         return {"verdict": "no_data", "ref_price": None, "inflated": False,
                 "used": len(prices), "fresh_skipped": fresh_skipped,
-                "backdrop_skipped": backdrop_skipped}
+                "backdrop_skipped": backdrop_skipped, "market_skipped": market_skipped}
 
     ref_price = percentile(prices, ref_percentile)
 
@@ -229,7 +238,7 @@ def check_pump(sales: list, current_floor: float, threshold: float, tol_pct: flo
     verdict = "pump" if ref_price < threshold else "ok"
     return {"verdict": verdict, "ref_price": ref_price, "inflated": inflated,
             "used": len(prices), "fresh_skipped": fresh_skipped,
-            "backdrop_skipped": backdrop_skipped,
+            "backdrop_skipped": backdrop_skipped, "market_skipped": market_skipped,
             "p20": p20, "p80": p80, "drift_pct": drift_pct, "span_days": span_days,
             "per_month": per_month, "share_buy": share_buy, "share_buy_20": share_buy_20,
             "ref50": ref50, "verdict50": verdict50, "buy_price": buy_price}

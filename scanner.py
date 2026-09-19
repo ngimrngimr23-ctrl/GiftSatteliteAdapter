@@ -4,7 +4,9 @@
 
 Цена модели берётся по сделкам (тем же процентилем, что и в отборе для
 ордеров), а не по чужим аскам — мы уже намерили, что на неликвиде аск
-расходится с реальной ценой в 1.5-2.6 раза.
+расходится с реальной ценой в 1.5-2.6 раза. Площадки, чьи сделки в расчёт не
+идут, перечислены в model_picker.PRICE_EXCLUDED_MARKETS — правило общее для
+сканера и для отбора моделей.
 
 Чёрные фоны считаются отдельно. Причина простая: Black и Onyx Black почти
 всегда дороже обычных, причём по-разному — в Toy Bear на модели El Rojo
@@ -39,10 +41,6 @@ class ScanParams:
     price_max: float = 0.0             # 0 = без верхней границы
     illiquid_per_month: float = 4.0    # реже этого — модель считается неликвидом
     illiquid_factor: float = 1.3       # и требование по выгоде для неё умножается
-    # Сделки с Telegram Market в расчёт цены не идут: комиссия там другая, и
-    # цены несопоставимы с остальными площадками. Листинги оттуда по-прежнему
-    # рассматриваются как оферы — покупать там не проблема.
-    exclude_price_markets: tuple = ("telegram", "tg")
     ref_percentile: float = 45.0
     fresh_hours: float = 24.0
     sales_depth: int = 16
@@ -295,7 +293,7 @@ def scan_collection(client, collection: str, account, params: ScanParams,
             sales = fetch_sales(collection, model)
             if sales:
                 stats = sales_stats(sales, excluded, params.fresh_hours, time.time(),
-                                    params.ref_percentile, params.exclude_price_markets)
+                                    params.ref_percentile)
             models_data[model] = {
                 "ref": stats["ref"] if stats else None,
                 "per_month": stats["per_month"] if stats else None,

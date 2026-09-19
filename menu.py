@@ -122,7 +122,7 @@ def models_report_csv(accounts: list) -> str:
             "обычная цена;дешёвый край p20;середина p50;дорогой край p80;разброс p80/p20;"
             "цена закупки;доля сделок выше закупки %;доля сделок выше закупки +20% %;"
             "сделок в месяц;вердикт при p50;"
-            "сделок учтено;сделок всего;история за дней;дрейф цены %;порог"]
+            "сделок учтено;сделок всего;сделок вне учёта (маркет);история за дней;дрейф цены %;порог"]
 
     def num(value, digits=2):
         if value is None:
@@ -155,6 +155,7 @@ def models_report_csv(accounts: list) -> str:
                     verdict50,
                     str(d.get("used", "")),
                     str(d.get("sales_total", "")),
+                    str(d.get("market_skipped", "")),
                     num(d.get("span_days"), 1),
                     num(d.get("drift_pct"), 1),
                     num(rep.get("threshold")),
