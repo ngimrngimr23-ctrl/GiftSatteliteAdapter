@@ -20,6 +20,12 @@ RETRY_BACKOFF_SECONDS = 2.0  # база линейного бэкоффа: 2с, 
 # сервис принимает, вместо того чтобы биться в лимит на каждом запросе.
 THROTTLE_STEP = 1.15  # во сколько раз растягиваем паузу после 429
 MAX_THROTTLE = 2.0  # выше этого не поднимаем, иначе проход встанет совсем
+# Пауза умела только расти. Один шторм 429 (например, когда в API параллельно
+# ходили два процесса) разгонял её до потолка, и она такой оставалась до конца
+# жизни процесса — скан шёл втрое медленнее уже без всякой причины. Теперь она
+# сползает обратно, если лимит давно не срабатывал.
+THROTTLE_RECOVER_AFTER = 120.0  # столько секунд без 429, прежде чем сбавлять
+THROTTLE_RECOVER_EVERY = 60.0   # и не чаще раза в минуту
 HISTORY_PAGE_SIZE = 20  # жёсткий потолок pageSize у POST /history/:collection
 
 
@@ -49,7 +55,10 @@ class GiftApiClient:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.min_interval = min_interval  # пауза между запросами, чтобы не упираться в rate limit
+        self._base_interval = min_interval  # к ней возвращаемся, когда лимит отпустил
         self._last_call = 0.0
+        self._last_429 = 0.0
+        self._last_recover = 0.0
         # Клиент один на аккаунт, а ходят в него параллельно: цикл цен, ручной
         # пересмотр моделей и скан рынка. Без замка потоки проходят проверку
         # паузы одновременно и стреляют залпом — ровно отсюда и берутся 429
@@ -60,10 +69,23 @@ class GiftApiClient:
     def _headers(self):
         return {"Authorization": f"Token {self.token}"}
 
+    def _recover_throttle(self, now: float):
+        """Вернуть паузу к базовой, если 429 давно не было. Зовётся под замком."""
+        if self.min_interval <= self._base_interval:
+            return
+        if now - self._last_429 < THROTTLE_RECOVER_AFTER:
+            return
+        if now - self._last_recover < THROTTLE_RECOVER_EVERY:
+            return
+        self._last_recover = now
+        self.min_interval = max(self._base_interval, self.min_interval / THROTTLE_STEP)
+        log.info("лимит отпустил: пауза между запросами теперь %.2fс", self.min_interval)
+
     def _throttle(self):
         # замок держим и на время сна: лимит общий на аккаунт, значит и очередь
         # должна быть общей, иначе два потока просто поделят паузу пополам
         with self._call_lock:
+            self._recover_throttle(time.monotonic())
             elapsed = time.monotonic() - self._last_call
             if elapsed < self.min_interval:
                 time.sleep(self.min_interval - elapsed)
@@ -84,9 +106,11 @@ class GiftApiClient:
                 raise ApiError(f"{method} {path} -> 429: rate limit не отпустил за {MAX_429_RETRIES} попыток")
             # раз лимит сработал — сбавляем темп на будущее, иначе следующий
             # запрос упрётся точно так же
-            if self.min_interval < MAX_THROTTLE:
-                self.min_interval = min(MAX_THROTTLE, self.min_interval * THROTTLE_STEP)
-                log.info("сбавляю темп: пауза между запросами теперь %.2fс", self.min_interval)
+            with self._call_lock:
+                self._last_429 = time.monotonic()
+                if self.min_interval < MAX_THROTTLE:
+                    self.min_interval = min(MAX_THROTTLE, self.min_interval * THROTTLE_STEP)
+                    log.info("сбавляю темп: пауза между запросами теперь %.2fс", self.min_interval)
             delay = RETRY_BACKOFF_SECONDS * (attempt + 1)
             log.warning("429 rate limit on %s, backing off %.1fs (попытка %d/%d)",
                         path, delay, attempt + 1, MAX_429_RETRIES)
