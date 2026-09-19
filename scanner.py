@@ -59,6 +59,10 @@ class ScanParams:
     # разница между первым прогоном в часы и следующими в минуты.
     baseline_max_age_h: float = 48.0
     collections: list = field(default_factory=list)  # пусто = все коллекции сервиса
+    # Пропускать коллекции, по которым база уже собрана. Нужно, чтобы достроить
+    # базу после обрыва: искать оферы так нельзя (листинги меняются), а вот
+    # добрать недостающие коллекции — минуты вместо часа.
+    only_missing: bool = False
 
 
 def is_black(backdrop: str) -> bool:
@@ -361,6 +365,13 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
     saved = {name: snap for name, snap in stored.items()
              if isinstance(snap, dict)
              and now_ts - snap.get("ts", 0) <= params.baseline_max_age_h * 3600}
+    if params.only_missing:
+        before = len(names)
+        names = [n for n in names if n not in saved]
+        if on_progress:
+            on_progress(f"Достраиваю базу: пропускаю {before - len(names)} уже собранных, "
+                        f"остаётся {len(names)}")
+
     if on_progress:
         on_progress(f"Коллекций к проходу: {len(names)}"
                     + (f"\nИз базы возьму цены по {len(saved)} коллекциям — "

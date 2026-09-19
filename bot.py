@@ -132,7 +132,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sales <коллекция>, <модель> — сами сделки, по которым бот оценил модель\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
         "/monochrome [подарок] — пары подарок+фон: где больше всего моделей влезает в один заказ\n"
-        "/scan [выгода%] [мин_цена] [макс_цена] — найти листинги ниже реальной цены модели\n"
+        "/scan [выгода%] [мин_цена] [макс_цена] [fast] [missing] — найти листинги ниже реальной "
+        "цены модели; fast — быстрый проход по дешёвому краю, missing — только коллекции, "
+        "которых ещё нет в базе\n"
         "/scanstop — прервать идущий скан\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
@@ -1084,6 +1086,9 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (IndexError, ValueError):
             return default
 
+    # слова-переключатели можно ставить в любом месте после чисел
+    words = {a.lower() for a in args}
+    args = [a for a in args if a.lower() not in ("fast", "missing")]
     params = scanner.ScanParams(
         min_benefit_pct=number(0, 20.0),
         price_min=number(1, 0.0),
@@ -1091,6 +1096,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ref_percentile=acc.ref_percentile,
         fresh_hours=acc.fresh_hours,
         sales_depth=acc.sales_depth,
+        # fast — не опрашивать модели поштучно: остаются только 50 самых
+        # дешёвых лотов на коллекцию, зато весь рынок за минуты
+        probe_all="fast" not in words,
+        only_missing="missing" in words,
     )
     if params.price_max and params.price_max < params.price_min:
         await update.message.reply_text("Максимальная цена меньше минимальной.")
@@ -1111,7 +1120,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Выгода от {params.min_benefit_pct:g}%"
         + (f", цена офера {params.price_min:g}–{params.price_max:g} TON"
            if params.price_max else f", цена офера от {params.price_min:g} TON") + "\n"
-        f"Маркетов {len(params.markets)}, аккаунт {acc.name}.\n\n"
+        f"Маркетов {len(params.markets)}, аккаунт {acc.name}."
+        + ("\nБыстрый проход: только дешёвый край, модели поштучно не опрашиваю."
+           if not params.probe_all else "")
+        + ("\nТолько недостающие коллекции." if params.only_missing else "") + "\n\n"
         "Первый проход долгий — собирается база цен по всем моделям. Находки буду "
         "слать по ходу. Остановить: /scanstop"
     )
