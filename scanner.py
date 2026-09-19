@@ -205,7 +205,7 @@ def _cheapest_per_model(offers: list) -> dict:
 
 
 def scan_collection(client, collection: str, account, params: ScanParams,
-                    known: dict | None, fetch_sales) -> tuple[list, dict]:
+                    known: dict | None, fetch_sales, should_stop=None) -> tuple[list, dict]:
     """
     Один подарок целиком. Возвращает (находки, что запомнить в базу).
 
@@ -284,6 +284,10 @@ def scan_collection(client, collection: str, account, params: ScanParams,
 
     wanted = sorted({o["model"] for o in offers if in_window(o["price"])})
     for model in wanted:
+        # проверяем и внутри коллекции: одна коллекция идёт минутами, и ждать
+        # её окончания ради остановки бессмысленно
+        if should_stop and should_stop():
+            break
         saved = known_models.get(model)
         if saved and saved.get("ref"):
             models_data[model] = dict(saved)
@@ -358,7 +362,8 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             break
         try:
             finds, snapshot = scan_collection(client, collection, account, params,
-                                              saved.get(collection), fetch_sales)
+                                              saved.get(collection), fetch_sales,
+                                              should_stop)
         except Exception as e:  # одна кривая коллекция не должна ронять весь проход
             account.record_error(f"scan {collection}: {e}")
             log.exception("скан %s упал", collection)
