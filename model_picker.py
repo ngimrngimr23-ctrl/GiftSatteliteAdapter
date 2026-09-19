@@ -95,27 +95,25 @@ def parse_sold_at(value) -> float | None:
         return None
 
 
-TG_MARKETS = {"telegram", "tg"}
-
-
 def sales_stats(sales: list, excluded: set, fresh_hours: float, now: float,
-                ref_percentile: float, tg_bonus: float = 0.0) -> dict | None:
+                ref_percentile: float, exclude_markets=frozenset()) -> dict | None:
     """
     Сводка по ряду сделок: опорная цена, медиана и ликвидность.
 
     Отдельно от check_pump, потому что сканеру рынка нужен не вердикт, а сами
     числа. Правило пригодности общее — sale_is_eligible.
 
-    tg_bonus поднимает цены сделок с Telegram Market: комиссия там выше, и без
-    поправки такие сделки занижают цену, по которой модель реально уходит.
+    exclude_markets выбрасывает сделки с перечисленных площадок целиком.
+    Комиссия там другая, и цены несопоставимы с остальными.
     """
+    skip = {m.strip().lower() for m in exclude_markets}
     prices, stamps = [], []
     for sale in sales:
         if sale_is_eligible(sale, excluded, fresh_hours, now) is not None:
             continue
+        if skip and (sale.get("market") or "").strip().lower() in skip:
+            continue
         price = sale["normalizedPrice"]
-        if tg_bonus and (sale.get("market") or "").strip().lower() in TG_MARKETS:
-            price *= 1 + tg_bonus
         prices.append(price)
         sold_ts = parse_sold_at(sale.get("soldAt"))
         if sold_ts is not None:
