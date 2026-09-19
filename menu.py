@@ -319,6 +319,80 @@ def sales_dump_text(collection: str, model: str, sales: list, meta: dict,
     return "\n".join(lines)
 
 
+def scan_finds_text(collection: str, finds: list, limit: int = 10) -> str:
+    """Порция находок по одной коллекции — уходит в чат по ходу прогона."""
+    lines = [f"💎 {collection} — находок {len(finds)}"]
+    for f in finds[:limit]:
+        tag = " ⚠️неликвид" if f.get("illiquid") else ""
+        backdrop = f" · {f['backdrop']}" if f.get("backdrop") else ""
+        lines.append(
+            f"• {f['model']}{backdrop} — {f['price']:.2f} вместо {f['expected']:.2f} "
+            f"(выгода {f['benefit']:.0f}%){tag}\n"
+            f"   {f['market']} · {f['rule']}"
+            + (f" · сделок/мес {f['per_month']:.0f}" if f.get("per_month") else "")
+        )
+    if len(finds) > limit:
+        lines.append(f"…и ещё {len(finds) - limit}, все будут в файле")
+    return "\n".join(lines)
+
+
+def scan_report_csv(finds: list) -> str:
+    """Все находки файлом — с числами, по которым принято решение."""
+    rows = ["коллекция;модель;фон;редкость %;маркет;цена офера;ожидаемая цена;"
+            "выгода %;планка %;правило;цена модели по сделкам;сделок в месяц;неликвид;ссылка"]
+
+    def num(value, digits=2):
+        if value is None:
+            return ""
+        return f"{value:.{digits}f}".replace(".", ",")
+
+    for f in sorted(finds, key=lambda f: -f["benefit"]):
+        rarity = f.get("rarity")
+        rows.append(";".join([
+            str(f.get("collection", "")).replace(";", ","),
+            str(f.get("model", "")).replace(";", ","),
+            str(f.get("backdrop", "")).replace(";", ","),
+            num(rarity / 10, 1) if rarity is not None else "",
+            str(f.get("market", "")),
+            num(f.get("price")),
+            num(f.get("expected")),
+            num(f.get("benefit"), 1),
+            num(f.get("required"), 1),
+            str(f.get("rule", "")).replace(";", ","),
+            num(f.get("model_ref")),
+            num(f.get("per_month"), 1),
+            "да" if f.get("illiquid") else "нет",
+            str(f.get("link", "")).replace(";", ","),
+        ]))
+    return "\n".join(rows)
+
+
+def scan_summary_text(result: dict, params) -> str:
+    """Итог прогона: что искали, что прошли, что нашли."""
+    finds = result.get("finds") or []
+    lines = [
+        "🔎 Скан рынка закончен",
+        f"Коллекций: всего {result.get('collections', 0)}, "
+        f"разобрано {result.get('scanned', 0)}, "
+        f"пропущено по верхней цене {result.get('skipped', 0)}",
+        f"Запросов к API: {result.get('requests', 0)}",
+        "",
+        f"Искали: выгода от {params.min_benefit_pct:g}%"
+        + (f", цена офера {params.price_min:g}–{params.price_max:g} TON"
+           if params.price_max else f", цена офера от {params.price_min:g} TON"),
+        f"Неликвид (реже {params.illiquid_per_month:g} сделок в месяц): "
+        f"планка ×{params.illiquid_factor:g}",
+        "",
+        f"Находок: {len(finds)}",
+    ]
+    if finds:
+        black = sum(1 for f in finds if f.get("backdrop", "").strip().lower()
+                    in ("black", "onyx black"))
+        lines.append(f"  из них на чёрных фонах: {black}")
+        lines.append(f"  лучшая: {finds[0]['model']} — выгода {finds[0]['benefit']:.0f}%")
+    return "\n".join(lines)
+
+
 def refresh_summary_text(acc) -> str:
     """
     Итог пересмотра моделей: по каждому заказу видно, что именно изменилось —

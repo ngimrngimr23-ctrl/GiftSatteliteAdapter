@@ -122,6 +122,15 @@ class GiftApiClient:
         return self._request("GET", path, params=params)
 
     # --- Gift (справочные данные) ---
+    def get_collections(self):
+        """
+        GET /gift/collections — все коллекции сервиса, отсортированные по имени.
+        Возвращает [{"name": ..., "telegramId": ...}]. Нужен сканеру рынка:
+        подписки покрывают лишь часть коллекций, а искать выгодные оферы надо
+        по всем.
+        """
+        return self._request("GET", "/gift/collections")
+
     def get_models(self, collection: str):
         """
         GET /gift/models/:collection — полный список моделей коллекции.

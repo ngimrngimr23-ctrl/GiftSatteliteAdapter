@@ -95,6 +95,44 @@ def parse_sold_at(value) -> float | None:
         return None
 
 
+TG_MARKETS = {"telegram", "tg"}
+
+
+def sales_stats(sales: list, excluded: set, fresh_hours: float, now: float,
+                ref_percentile: float, tg_bonus: float = 0.0) -> dict | None:
+    """
+    Сводка по ряду сделок: опорная цена, медиана и ликвидность.
+
+    Отдельно от check_pump, потому что сканеру рынка нужен не вердикт, а сами
+    числа. Правило пригодности общее — sale_is_eligible.
+
+    tg_bonus поднимает цены сделок с Telegram Market: комиссия там выше, и без
+    поправки такие сделки занижают цену, по которой модель реально уходит.
+    """
+    prices, stamps = [], []
+    for sale in sales:
+        if sale_is_eligible(sale, excluded, fresh_hours, now) is not None:
+            continue
+        price = sale["normalizedPrice"]
+        if tg_bonus and (sale.get("market") or "").strip().lower() in TG_MARKETS:
+            price *= 1 + tg_bonus
+        prices.append(price)
+        sold_ts = parse_sold_at(sale.get("soldAt"))
+        if sold_ts is not None:
+            stamps.append(sold_ts)
+    if not prices:
+        return None
+    span_days = (max(stamps) - min(stamps)) / 86400 if len(stamps) >= 2 else None
+    return {
+        "ref": percentile(prices, ref_percentile),
+        "median": percentile(prices, 50),
+        "used": len(prices),
+        "span_days": span_days,
+        # сделок в месяц: по ней сканер поднимает планку для неликвида
+        "per_month": len(prices) / span_days * 30 if span_days and span_days > 0 else None,
+    }
+
+
 def pick_candidates(model_floors: dict, collection_floor: float, premium_pct: float) -> list:
     """
     Модели с премией не ниже premium_pct над floor коллекции, от дорогих к дешёвым

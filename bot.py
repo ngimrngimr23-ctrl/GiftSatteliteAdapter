@@ -16,9 +16,11 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 import menu
 from api_client import GiftApiClient, HISTORY_PAGE_SIZE
 from state import (AccountState, load_persisted, save_persisted, load_global_settings,
-                   save_global_settings, storage_status)
-from updater import run_cycle
+                   save_global_settings, storage_status, load_scan_baseline,
+                   save_scan_baseline)
+from updater import run_cycle, fetch_sales_for
 import monochrome
+import scanner
 
 load_dotenv()
 
@@ -130,6 +132,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sales <коллекция>, <модель> — сами сделки, по которым бот оценил модель\n"
         "/restoremodels — вернуть подпискам ручные modelNames, какими они были до автоподбора\n"
         "/monochrome [подарок] — пары подарок+фон: где больше всего моделей влезает в один заказ\n"
+        "/scan [выгода%] [мин_цена] [макс_цена] — найти листинги ниже реальной цены модели\n"
+        "/scanstop — прервать идущий скан\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
@@ -1047,6 +1051,124 @@ async def cmd_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(document=data, filename=data.name)
 
 
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /scan [<acc>] [выгода%] [мин_цена] [макс_цена] — найти листинги, выставленные
+    заметно ниже цены, по которой модель реально уходит.
+
+    Проход по всем коллекциям идёт часами, поэтому находки уходят в чат
+    порциями по мере готовности, а собранные цены сохраняются в Upstash —
+    следующий прогон берёт их оттуда и укладывается в минуты.
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+    if context.bot_data.get("scan_running"):
+        await update.message.reply_text(
+            "Скан уже идёт. Остановить: /scanstop")
+        return
+
+    args = list(context.args)
+    if args and args[0] in accounts:
+        acc, args = accounts[args[0]], args[1:]
+    else:
+        acc = next((a for a in accounts.values() if not a.paused), None) or \
+            next(iter(accounts.values()))
+
+    def number(index, default):
+        try:
+            return float(args[index].replace(",", "."))
+        except (IndexError, ValueError):
+            return default
+
+    params = scanner.ScanParams(
+        min_benefit_pct=number(0, 20.0),
+        price_min=number(1, 0.0),
+        price_max=number(2, 0.0),
+        ref_percentile=acc.ref_percentile,
+        fresh_hours=acc.fresh_hours,
+        sales_depth=acc.sales_depth,
+    )
+    if params.price_max and params.price_max < params.price_min:
+        await update.message.reply_text("Максимальная цена меньше минимальной.")
+        return
+
+    chat_id = update.effective_chat.id
+    loop = asyncio.get_running_loop()
+    context.bot_data["scan_running"] = True
+    context.bot_data["scan_stop"] = False
+
+    def say(text: str):
+        # сканер живёт в отдельном потоке, отправка — в петле бота
+        asyncio.run_coroutine_threadsafe(
+            context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
+
+    await update.message.reply_text(
+        f"🔎 Запускаю скан рынка.\n"
+        f"Выгода от {params.min_benefit_pct:g}%"
+        + (f", цена офера {params.price_min:g}–{params.price_max:g} TON"
+           if params.price_max else f", цена офера от {params.price_min:g} TON") + "\n"
+        f"Маркетов {len(params.markets)}, аккаунт {acc.name}.\n\n"
+        "Первый проход долгий — собирается база цен по всем моделям. Находки буду "
+        "слать по ходу. Остановить: /scanstop"
+    )
+
+    saved = await asyncio.to_thread(load_scan_baseline)
+
+    def work():
+        acc.client.request_count = 0
+        return scanner.scan_market(
+            acc.client, acc, params, baseline=saved,
+            fetch_sales=lambda collection, model: fetch_sales_for(
+                acc.client, collection, model, params.sales_depth, acc),
+            on_progress=say,
+            on_finds=lambda collection, finds: say(menu.scan_finds_text(collection, finds)),
+            should_stop=lambda: context.bot_data.get("scan_stop"),
+        )
+
+    try:
+        result = await asyncio.to_thread(work)
+    except Exception as e:
+        log.exception("скан упал")
+        await update.message.reply_text(f"Скан оборвался: {e}")
+        return
+    finally:
+        context.bot_data["scan_running"] = False
+
+    if result.get("error"):
+        await update.message.reply_text(f"Не удалось получить список коллекций: {result['error']}")
+        return
+
+    # база живёт в Upstash: полный проход стоит часов, и терять его на
+    # перезапуске нельзя — следующий прогон возьмёт цены отсюда
+    baseline = result.get("baseline") or {}
+    if baseline:
+        await asyncio.to_thread(save_scan_baseline,
+                                {"ts": time.time(), "collections": baseline})
+
+    await update.message.reply_text(menu.scan_summary_text(result, params))
+    finds = result.get("finds") or []
+    if finds:
+        data = BytesIO(("\ufeff" + menu.scan_report_csv(finds)).encode("utf-8"))
+        data.name = f"scan_{datetime.now():%Y-%m-%d_%H%M}.csv"
+        await update.message.reply_document(document=data, filename=data.name)
+
+
+async def cmd_scanstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scanstop — прервать идущий скан после текущей коллекции."""
+    if not authorized(update):
+        return
+    if not context.bot_data.get("scan_running"):
+        await update.message.reply_text("Скан сейчас не идёт.")
+        return
+    context.bot_data["scan_stop"] = True
+    await update.message.reply_text(
+        "Остановлю после текущей коллекции. Найденное и собранная база сохранятся.")
+
+
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /forceupdate         — пересчитать цены сразу для ВСЕХ аккаунтов (кроме тех, что на паузе)
@@ -1272,6 +1394,8 @@ BOT_COMMANDS = [
     ("sales", "Сами сделки по модели: /sales <коллекция>, <модель>"),
     ("restoremodels", "Вернуть ручные modelNames до автоподбора"),
     ("monochrome", "Пары подарок+фон: где больше всего моделей в один floor"),
+    ("scan", "Скан рынка: листинги ниже реальной цены модели"),
+    ("scanstop", "Прервать идущий скан"),
     ("forceupdate", "Пересчитать цены сейчас"),
     ("setinterval", "Как часто (в минутах) проверяются цены"),
     ("pause", "Остановить конкретный аккаунт"),
@@ -1313,6 +1437,8 @@ def main():
     app.add_handler(CommandHandler("setpercentile", cmd_setpercentile))
     app.add_handler(CommandHandler("monochrome", cmd_monochrome))
     app.add_handler(CommandHandler("sales", cmd_sales))
+    app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("scanstop", cmd_scanstop))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))

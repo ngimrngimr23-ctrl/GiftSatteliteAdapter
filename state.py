@@ -15,6 +15,9 @@ MAX_ERRORS = 30  # сколько последних ошибок хранить
 GLOBAL_STATE_FILE = "global_state.json"  # фолбэк для локальной разработки
 GLOBAL_REDIS_KEY = os.environ.get("REDIS_GLOBAL_KEY", "giftadapter:global")
 
+SCAN_STATE_FILE = "scan_baseline.json"  # фолбэк для локальной разработки
+SCAN_REDIS_KEY = os.environ.get("REDIS_SCAN_KEY", "giftadapter:scan")
+
 
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -247,3 +250,22 @@ def save_global_settings(data: dict):
 
 
     
+
+
+def load_scan_baseline() -> dict:
+    """
+    База скана рынка: цены моделей по сделкам, надбавки за чёрные фоны, floor'ы
+    коллекций. Полный проход собирает её часами, поэтому она переживает
+    перезапуск — иначе каждый следующий прогон стоил бы столько же, сколько
+    первый (кеши в памяти живут 6 часов и умирают вместе с процессом).
+    """
+    if _UPSTASH_ENABLED:
+        return _load_from_upstash_key(SCAN_REDIS_KEY)
+    return _load_from_file_path(SCAN_STATE_FILE)
+
+
+def save_scan_baseline(data: dict):
+    if _UPSTASH_ENABLED:
+        _save_to_upstash_key(SCAN_REDIS_KEY, data)
+        return
+    _save_to_file_path(SCAN_STATE_FILE, data)

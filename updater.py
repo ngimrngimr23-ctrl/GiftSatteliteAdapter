@@ -329,6 +329,21 @@ def _fetch_sales(client, collection: str, model: str, depth: int, account, now: 
     return sales
 
 
+def fetch_sales_for(client, collection: str, model: str, depth: int, account) -> list:
+    """
+    Сделки модели для внешних потребителей (сканер рынка).
+
+    Отдельная обёртка, чтобы сканер ходил через тот же кеш и то же правило
+    глубины «не меньше depth и не меньше трёх недель», что и отбор моделей —
+    иначе две части бота считали бы цену по разным выборкам.
+    """
+    try:
+        return _fetch_sales(client, collection, model, depth, account, time.time())
+    except ApiError as e:
+        account.record_error(f"sales {collection}/{model}: {e}")
+        return []
+
+
 def _select_models(client, sub: dict, floor: float, model_floors: dict, account, now: float,
                    buy_price: float | None = None) -> dict:
     """
