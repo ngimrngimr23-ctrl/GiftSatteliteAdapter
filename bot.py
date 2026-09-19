@@ -1407,6 +1407,18 @@ BOT_COMMANDS = [
 ]
 
 
+async def _post_shutdown(app: Application):
+    """
+    Гасим скан при остановке процесса. Иначе он переживает деплой: Render
+    поднимает новый инстанс раньше, чем гаснет старый, старый теряет связь с
+    телеграмом (и с /scanstop), но продолжает ходить в API — в логах это
+    выглядело как два прохода по разным коллекциям одновременно.
+    """
+    if not scanner.SHUTDOWN.is_set():
+        scanner.SHUTDOWN.set()
+        log.info("останавливаю скан: процесс гасится")
+
+
 async def _post_init(app: Application):
     await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in BOT_COMMANDS])
 
@@ -1417,7 +1429,8 @@ def main():
     global_settings = load_global_settings()
     cycle_seconds = global_settings.get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
 
-    app = Application.builder().token(TG_BOT_TOKEN).post_init(_post_init).build()
+    app = (Application.builder().token(TG_BOT_TOKEN)
+           .post_init(_post_init).post_shutdown(_post_shutdown).build())
     app.bot_data["accounts"] = accounts
     app.bot_data["cycle_seconds"] = cycle_seconds
     # меню не импортирует bot.py (иначе вышел бы circular import), нужное отдаём через bot_data

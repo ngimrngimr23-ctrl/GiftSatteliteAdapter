@@ -15,6 +15,7 @@
 """
 import logging
 import statistics
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -31,6 +32,13 @@ _BLACK_LOWER = {b.lower() for b in BLACK_BACKDROPS}
 # сделки запрашиваются с фильтром по фону, поэтому страница целиком состоит из
 # них и трёх хватает на устойчивую медиану.
 COLLECTION_HISTORY_PAGES = 3
+
+# Флаг остановки на весь процесс. Нужен потому, что скан живёт в потоке пула, а
+# потоки пула дожидаются завершения при выходе — то есть процесс не может
+# умереть, пока идёт проход. При деплое Render поднимает новый инстанс раньше,
+# чем гаснет старый: старый перестаёт опрашивать телеграм, /scanstop до него уже
+# не доходит, а скан всё это время продолжает ходить в API тем же токеном.
+SHUTDOWN = threading.Event()
 
 
 @dataclass
@@ -286,7 +294,7 @@ def scan_collection(client, collection: str, account, params: ScanParams,
     for model in wanted:
         # проверяем и внутри коллекции: одна коллекция идёт минутами, и ждать
         # её окончания ради остановки бессмысленно
-        if should_stop and should_stop():
+        if SHUTDOWN.is_set() or (should_stop and should_stop()):
             break
         saved = known_models.get(model)
         if saved and saved.get("ref"):
@@ -362,6 +370,9 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
     collected, all_finds = {}, []
     done = skipped = 0
     for index, collection in enumerate(names, 1):
+        if SHUTDOWN.is_set():
+            log.info("процесс гасится — прерываю скан на %d из %d", index - 1, len(names))
+            break
         if should_stop and should_stop():
             if on_progress:
                 on_progress(f"Остановлено на {index - 1} из {len(names)}")
