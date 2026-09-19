@@ -316,21 +316,25 @@ def scan_collection(client, collection: str, account, params: ScanParams,
 
     finds.sort(key=lambda f: -f["benefit"])
     snapshot = {
-        "floor": floor,
+        "ts": time.time(),   # возраст считаем по коллекции: база пополняется
+        "floor": floor,      # по частям, и общая отметка врала бы про старые
         "premiums_full": premiums,
         "models": models_data,
     }
     return finds, snapshot
 
 def scan_market(client, account, params: ScanParams, fetch_sales,
-                baseline: dict | None = None,
-                on_progress=None, on_finds=None, should_stop=None) -> dict:
+                baseline: dict | None = None, on_progress=None, on_finds=None,
+                should_stop=None, on_baseline=None, baseline_every: int = 5) -> dict:
     """
     Полный проход. Результаты отдаются порциями через on_finds, а не одним
     куском в конце: прогон по всем коллекциям идёт часами, и обрыв посередине
     не должен обнулять уже найденное.
 
-    should_stop() -> True прерывает проход между коллекциями.
+    should_stop() -> True прерывает проход.
+
+    on_baseline(собранное) зовётся каждые baseline_every коллекций: полный
+    проход идёт часами, и терять его из-за перезапуска или обрыва нельзя.
     """
     names = list(params.collections)
     if not names:
@@ -342,15 +346,17 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             return {"error": str(e), "collections": 0}
     names.sort()
 
-    # база прошлого прогона: годится, пока не устарела
-    saved = (baseline or {}).get("collections") or {}
-    age_h = (time.time() - (baseline or {}).get("ts", 0)) / 3600 if baseline else None
-    if saved and age_h is not None and age_h > params.baseline_max_age_h:
-        saved = {}
+    # база прошлого прогона: каждая коллекция живёт со своим возрастом, потому
+    # что база пополняется по частям и общая отметка врала бы про старые записи
+    now_ts = time.time()
+    stored = (baseline or {}).get("collections") or {}
+    saved = {name: snap for name, snap in stored.items()
+             if isinstance(snap, dict)
+             and now_ts - snap.get("ts", 0) <= params.baseline_max_age_h * 3600}
     if on_progress:
         on_progress(f"Коллекций к проходу: {len(names)}"
-                    + (f"\nБеру цены из базы {age_h:.0f}ч давности по {len(saved)} коллекциям "
-                       f"— история заново не собирается"
+                    + (f"\nИз базы возьму цены по {len(saved)} коллекциям — "
+                       f"историю по ним заново не собираю"
                        if saved else "\nБазы нет, собираю историю с нуля — это долго"))
 
     collected, all_finds = {}, []
@@ -370,6 +376,12 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             continue
         if snapshot:
             collected[collection] = snapshot
+        # сохраняем по ходу, а не в конце: проход идёт часами
+        if on_baseline and collected and index % baseline_every == 0:
+            try:
+                on_baseline(dict(collected))
+            except Exception as e:
+                log.warning("не смог сохранить базу на %d-й коллекции: %s", index, e)
         if snapshot.get("skipped"):
             skipped += 1
         else:
@@ -382,6 +394,12 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             on_progress(f"Пройдено {index} из {len(names)}: "
                         f"разобрано {done}, пропущено по цене {skipped}, "
                         f"находок {len(all_finds)}, запросов {client.request_count}")
+
+    if on_baseline and collected:
+        try:
+            on_baseline(dict(collected))
+        except Exception as e:
+            log.warning("не смог сохранить базу в конце прохода: %s", e)
 
     return {
         "finds": sorted(all_finds, key=lambda f: -f["benefit"]),

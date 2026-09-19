@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+import threading
 from urllib.parse import quote
 
 import requests
@@ -49,16 +50,24 @@ class GiftApiClient:
         self.base_url = base_url.rstrip("/")
         self.min_interval = min_interval  # пауза между запросами, чтобы не упираться в rate limit
         self._last_call = 0.0
+        # Клиент один на аккаунт, а ходят в него параллельно: цикл цен, ручной
+        # пересмотр моделей и скан рынка. Без замка потоки проходят проверку
+        # паузы одновременно и стреляют залпом — ровно отсюда и берутся 429
+        # пачками, которые видно в логах.
+        self._call_lock = threading.Lock()
         self.request_count = 0  # сбрасывается в начале цикла — видно, во что обошёлся автоподбор
 
     def _headers(self):
         return {"Authorization": f"Token {self.token}"}
 
     def _throttle(self):
-        elapsed = time.monotonic() - self._last_call
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
-        self._last_call = time.monotonic()
+        # замок держим и на время сна: лимит общий на аккаунт, значит и очередь
+        # должна быть общей, иначе два потока просто поделят паузу пополам
+        with self._call_lock:
+            elapsed = time.monotonic() - self._last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last_call = time.monotonic()
 
     def _request(self, method: str, path: str, **kwargs):
         # Ретраи на 429 сделаны циклом, а не рекурсией: автоподбор моделей шлёт

@@ -1118,6 +1118,13 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     saved = await asyncio.to_thread(load_scan_baseline)
 
+    def persist(collected: dict):
+        # к собранному подмешиваем то, что уже лежало: прогон мог идти по части
+        # рынка, и коллекции, которых он не касался, терять нельзя
+        merged = dict((saved or {}).get("collections") or {})
+        merged.update(collected)
+        save_scan_baseline({"ts": time.time(), "collections": merged})
+
     def work():
         acc.client.request_count = 0
         return scanner.scan_market(
@@ -1127,6 +1134,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             on_progress=say,
             on_finds=lambda collection, finds: say(menu.scan_finds_text(collection, finds)),
             should_stop=lambda: context.bot_data.get("scan_stop"),
+            on_baseline=persist,
         )
 
     try:
@@ -1141,13 +1149,6 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result.get("error"):
         await update.message.reply_text(f"Не удалось получить список коллекций: {result['error']}")
         return
-
-    # база живёт в Upstash: полный проход стоит часов, и терять его на
-    # перезапуске нельзя — следующий прогон возьмёт цены отсюда
-    baseline = result.get("baseline") or {}
-    if baseline:
-        await asyncio.to_thread(save_scan_baseline,
-                                {"ts": time.time(), "collections": baseline})
 
     await update.message.reply_text(menu.scan_summary_text(result, params))
     finds = result.get("finds") or []
