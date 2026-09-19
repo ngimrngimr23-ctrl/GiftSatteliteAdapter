@@ -423,7 +423,11 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             if on_finds:
                 on_finds(collection, finds)
         if on_progress and index % 10 == 0:
-            on_progress(f"Пройдено {index} из {len(names)}: "
+            # В режиме missing счёт идёт по оставшимся коллекциям, а не по всему
+            # рынку, и «10 из 116» читалось как откат назад. Показываем оба числа.
+            tail = (f" · по рынку {known + index} из {known + len(names)}"
+                    if params.only_missing and known else "")
+            on_progress(f"Пройдено {index} из {len(names)}{tail}: "
                         f"разобрано {done}, пропущено по цене {skipped}, "
                         f"находок {len(all_finds)}, запросов {client.request_count}")
 
