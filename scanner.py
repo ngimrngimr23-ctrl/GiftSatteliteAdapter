@@ -271,7 +271,18 @@ def scan_collection(client, collection: str, account, params: ScanParams,
     excluded = set(_BLACK_LOWER)  # чёрные сделки не идут в «нормальную» цену модели
     models_data, finds = {}, []
     known_models = (known or {}).get("models") or {}
-    for model in sorted(set(o["model"] for o in offers)):
+    # Историю — самую дорогую часть прохода — качаем только для моделей, у
+    # которых есть офер внутри ценового окна. У остальных находки быть не может
+    # по определению, и цена по сделкам им не нужна.
+    def in_window(price: float) -> bool:
+        if params.price_min and price < params.price_min:
+            return False
+        if params.price_max and price > params.price_max:
+            return False
+        return True
+
+    wanted = sorted({o["model"] for o in offers if in_window(o["price"])})
+    for model in wanted:
         saved = known_models.get(model)
         if saved and saved.get("ref"):
             models_data[model] = dict(saved)
@@ -289,7 +300,7 @@ def scan_collection(client, collection: str, account, params: ScanParams,
                 "rarity": catalog.get(model),
             }
         for offer in offers:
-            if offer["model"] != model:
+            if offer["model"] != model or not in_window(offer["price"]):
                 continue
             hit = evaluate_offer(offer, models_data[model]["ref"], premiums,
                                  models_data[model]["per_month"], params)
