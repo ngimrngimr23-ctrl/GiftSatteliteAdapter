@@ -1177,7 +1177,7 @@ def premium_target_text(result: dict) -> str:
 
 def premium_target_csv(result: dict) -> str:
     rows = ["коллекция;модель;фон;совпало %;ΔE;надбавка %;без поправки %;"
-            "уровень фона;продаж с фоном;прочих продаж"]
+            "уровень фона;продаж с фоном;сравнено по датам;прочих продаж"]
 
     def num(value, digits=1):
         return "" if value is None else f"{value:.{digits}f}".replace(".", ",")
@@ -1187,6 +1187,6 @@ def premium_target_csv(result: dict) -> str:
             str(r["collection"]).replace(";", ","), str(r["model"]).replace(";", ","),
             str(r["backdrop"]).replace(";", ","), num(r["share"] * 100, 0),
             num(r["delta"]), num(r["premium"]), num(r["raw"]), num(r["level"], 3),
-            str(r["matched_n"]), str(r["others_n"]),
+            str(r["matched_n"]), str(r.get("paired_n", "")), str(r["others_n"]),
         ]))
     return "\n".join(rows)

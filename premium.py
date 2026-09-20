@@ -28,6 +28,7 @@ import threading
 import time
 
 from api_client import ApiError
+from model_picker import parse_sold_at
 
 log = logging.getLogger("premium")
 
@@ -287,6 +288,8 @@ def summarise(data: dict, match_from: float = 0.5) -> dict:
 
 TARGET_PAGES = 2            # страниц на запрос, по 20 продаж
 TARGET_MIN_SALES = 3        # меньше — медиана ничего не значит
+WINDOW_DAYS = 10.0          # в каком окне вокруг продажи ищем, с чем её сравнить
+NEAR_MIN = 3                # меньше соседних продаж — сравнивать не с чем
 
 
 def _filtered(client, collection, account, models, backdrops, pages):
@@ -311,6 +314,7 @@ def _filtered(client, collection, account, models, backdrops, pages):
 
 def targeted(client, account, table: dict, levels: dict,
              pages: int = TARGET_PAGES, min_sales: int = TARGET_MIN_SALES,
+             window_days: float = WINDOW_DAYS, near_min: int = NEAR_MIN,
              on_progress=None, should_stop=None) -> dict:
     """
     Спросить историю ровно по парам «модель + подходящий ей фон».
@@ -321,7 +325,8 @@ def targeted(client, account, table: dict, levels: dict,
     дорог сам по себе.
     """
     rows, skipped = [], {"мало продаж с фоном": 0, "мало прочих продаж": 0,
-                         "уровень фона неизвестен": 0}
+                         "уровень фона неизвестен": 0,
+                         "не с чем сравнить по времени": 0}
     keys = sorted(table)
     for index, key in enumerate(keys, 1):
         if SHUTDOWN.is_set() or (should_stop and should_stop()):
@@ -336,23 +341,48 @@ def targeted(client, account, table: dict, levels: dict,
         if len(with_backdrop) < min_sales:
             skipped["мало продаж с фоном"] += 1
             continue
-        everything = _filtered(client, collection, account, [model], None, pages + 1)
-        others = [s["normalizedPrice"] for s in everything
+        everything = _filtered(client, collection, account, [model], None, pages + 2)
+        others = [(parse_sold_at(s.get("soldAt")), s["normalizedPrice"]) for s in everything
                   if (s.get("backdropName") or "").strip().lower()
                   != backdrop.strip().lower()]
+        others = [(ts, price) for ts, price in others if ts]
         if len(others) < min_sales:
             skipped["мало прочих продаж"] += 1
             continue
-        matched = statistics.median(s["normalizedPrice"] for s in with_backdrop)
-        base = statistics.median(others)
-        if base <= 0:
+
+        # Каждую продажу с нужным фоном сравниваем с продажами той же модели,
+        # случившимися рядом по времени, а не со всеми подряд.
+        #
+        # Без этого замер меряет не фон, а движение рынка. У редкой пары
+        # последние двадцать продаж уходят на месяцы назад, у модели целиком —
+        # на дни; рынок за это время ушёл, и старое выглядит дороже нового.
+        # В первом прогоне это било прямо в ответ: у пар с 3-9 продажами
+        # надбавка выходила +19%, у пар с 35-40 продажами -13%. Настоящий
+        # эффект от числа продаж зависеть не может.
+        ratios = []
+        for sale in with_backdrop:
+            when = parse_sold_at(sale.get("soldAt"))
+            if not when:
+                continue
+            near = [price for ts, price in others if abs(ts - when) <= window_days * 86400]
+            if len(near) < near_min:
+                continue
+            base_near = statistics.median(near)
+            if base_near > 0:
+                ratios.append(sale["normalizedPrice"] / base_near)
+        if len(ratios) < min_sales:
+            skipped["не с чем сравнить по времени"] += 1
             continue
+        ratio = statistics.median(ratios)
+        matched = statistics.median(s["normalizedPrice"] for s in with_backdrop)
+        base = statistics.median(price for _, price in others)
         rows.append({
             "collection": collection, "model": model, "backdrop": backdrop,
             "share": share, "delta": delta,
             "matched_n": len(with_backdrop), "others_n": len(others),
+            "paired_n": len(ratios),
             "raw": (matched / base - 1) * 100,
-            "premium": (matched / base / level - 1) * 100,
+            "premium": (ratio / level - 1) * 100,
             "level": level,
         })
         if on_progress and index % 20 == 0:
