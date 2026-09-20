@@ -984,7 +984,8 @@ def colors_text(base: dict) -> str:
              f"Коллекций: {len(models)}, моделей: {total}",
              f"Фонов: {len(backdrops)}"]
     if thin:
-        lines.append(f"⚠️ по одному снимку (узор мог не отсеяться): {thin}")
+        lines.append(f"⚠️ по одному снимку (узор мог не отсеяться): {thin}\n"
+                     f"   добрать, когда появятся лоты на других фонах: /colors 2 thin")
     if backdrops:
         lines.append("\nФоны, самые частые:")
         top = sorted(backdrops.items(), key=lambda kv: -(kv[1] or {}).get("n", 0))[:12]

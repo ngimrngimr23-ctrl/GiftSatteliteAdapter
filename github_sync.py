@@ -29,8 +29,25 @@ API = "https://api.github.com"
 
 # Строки, похожие на секреты. Если такое попало в выгрузку — значит ошиблись
 # источником данных, и отправлять нельзя.
+#
+# Голое слово тут не годится: на выгрузке цветов правило сорвалось на фоне,
+# который так и называется — Secret. Поэтому ловим не слово, а форму: либо
+# «ключ = значение», либо узнаваемый вид самого токена.
 _SECRET_HINTS = re.compile(
-    r"api[_-]?token|\bsecret\b|\bpassword\b|bot\d{6,}:[A-Za-z0-9_-]{30,}", re.I)
+    r"(?:[a-z]+[_-])?(?:token|key|secret|password|passwd|authorization)"
+    r"\s*[=:]\s*\S{8,}"
+    r"|bot\d{6,}:[A-Za-z0-9_-]{30,}"          # токен телеграм-бота
+    r"|gh[pousr]_[A-Za-z0-9]{30,}"             # токен GitHub
+    r"|\bAKIA[0-9A-Z]{16}\b",                 # ключ AWS
+    re.I)
+
+# Длинная случайная строка — так выглядят токены Upstash и прочие base64.
+# Регистр здесь важен, поэтому правило отдельное: под re.I проверка на
+# заглавные буквы не значила бы ничего. В именах моделей и фонов таких строк
+# не бывает — там пробелы и десяток символов.
+_SECRET_BLOB = re.compile(
+    r"(?=[A-Za-z0-9_\-]*[0-9])(?=[A-Za-z0-9_\-]*[A-Z])"
+    r"(?=[A-Za-z0-9_\-]*[a-z])[A-Za-z0-9_\-]{40,}")
 
 
 # Не чаще раза в столько секунд. Каждая выгрузка — это коммит, и без паузы
@@ -66,8 +83,12 @@ def publish_throttled(text: str, message: str) -> str | None:
 
 def looks_secret(text: str) -> str | None:
     """Вернуть найденный признак секрета или None, если чисто."""
-    found = _SECRET_HINTS.search(text or "")
-    return found.group(0) if found else None
+    for pattern in (_SECRET_HINTS, _SECRET_BLOB):
+        found = pattern.search(text or "")
+        if found:
+            hit = found.group(0)
+            return hit if len(hit) <= 24 else hit[:12] + "…" + hit[-4:]
+    return None
 
 
 def _request(method: str, url: str, payload: dict | None = None):

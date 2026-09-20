@@ -320,13 +320,17 @@ def merge_palettes(samples: list) -> list:
             for g in kept[:PALETTE_SIZE]]
 
 
-def pick_samples(offers: list, per_model: int) -> dict:
+def pick_samples(offers: list, per_model: int, already=None) -> dict:
     """
     Из листингов — по нескольку экземпляров на модель, с разными фонами.
 
     Разные фоны здесь не прихоть: именно на них держится отсев узора и
     просвечивающих частей. Если у модели все лоты на одном фоне, берём что
     есть — но снимков будет меньше, и это отразится в пометке seen.
+
+    already(модель) -> фоны, которые уже сняты в прошлый раз. При доборе они
+    исключаются: второй снимок на том же фоне ничего не отсеет, узор на нём
+    будет ровно тот же самый.
     """
     by_model = {}
     for offer in offers:
@@ -337,7 +341,8 @@ def pick_samples(offers: list, per_model: int) -> dict:
         by_model.setdefault(model, []).append(offer)
     out = {}
     for model, items in by_model.items():
-        chosen, used = [], set()
+        seen_before = {b.strip().lower() for b in (already(model) if already else ())}
+        chosen, used = [], set(seen_before)
         for item in items:
             backdrop = (item.get("backdrop") or "").strip().lower()
             if backdrop in used:
@@ -346,18 +351,19 @@ def pick_samples(offers: list, per_model: int) -> dict:
             chosen.append(item)
             if len(chosen) >= per_model:
                 break
-        for item in items:                      # добираем, если фонов не хватило
-            if len(chosen) >= per_model:
-                break
-            if item not in chosen:
-                chosen.append(item)
+        if not seen_before:                     # добираем, если фонов не хватило
+            for item in items:
+                if len(chosen) >= per_model:
+                    break
+                if item not in chosen:
+                    chosen.append(item)
         out[model] = chosen
     return out
 
 
 def collect(offers_for, collections: list, per_model: int = SAMPLES_PER_MODEL,
             known: dict | None = None, on_progress=None, on_save=None,
-            should_stop=None, save_every: int = 5) -> dict:
+            should_stop=None, save_every: int = 5, redo_thin: bool = False) -> dict:
     """
     Цвета моделей и фонов по всему рынку.
 
@@ -383,13 +389,28 @@ def collect(offers_for, collections: list, per_model: int = SAMPLES_PER_MODEL,
             stats["errors"] += 1
             continue
 
-        for model, items in pick_samples(offers, per_model).items():
+        def already(model):
+            return (done.get(model) or {}).get("backdrops") or ()
+
+        for model, items in pick_samples(offers, per_model,
+                                         already if redo_thin else None).items():
             if SHUTDOWN.is_set() or (should_stop and should_stop()):
                 break
-            if done.get(model, {}).get("palette"):
+            have = done.get(model) or {}
+            prior = have.get("palette") or []
+            if prior and (not redo_thin or have.get("samples", 0) >= per_model):
                 stats["skipped"] += 1
                 continue
-            palettes = []
+            if prior and not items:
+                # добирать нечем: ни одного лота на новом фоне
+                stats["skipped"] += 1
+                continue
+            # Уже собранную палитру заводим в слияние как ещё один снимок:
+            # тогда сегодняшний снимок с другого фона отсеет в ней узор, а не
+            # заменит её собой.
+            palettes = [[{"rgb": tuple(e["rgb"]), "share": e.get("share", 0)}
+                         for e in prior]] if prior else []
+            shot_backdrops = list(have.get("backdrops") or [])
             for item in items:
                 wait = MIN_INTERVAL - (time.monotonic() - last)
                 if wait > 0:
@@ -406,13 +427,15 @@ def collect(offers_for, collections: list, per_model: int = SAMPLES_PER_MODEL,
                 palettes.append(got["palette"])
                 backdrop = (item.get("backdrop") or "").strip()
                 if backdrop:
+                    shot_backdrops.append(backdrop)
                     seen = backdrops.setdefault(backdrop, {})
                     samples = seen.setdefault("samples", [])
                     samples.append(list(got["backdrop_rgb"]))
                     del samples[:-BACKDROP_SAMPLES]
             palette = merge_palettes(palettes)
             if palette:
-                done[model] = {"palette": palette, "samples": len(palettes)}
+                done[model] = {"palette": palette, "samples": len(palettes),
+                               "backdrops": shot_backdrops[:8]}
                 stats["models"] += 1
 
         if on_progress and index % 5 == 0:

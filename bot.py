@@ -143,7 +143,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch [просадка%] [мин_цена] [макс_цена] [all] — дозор: гоняет по кругу одни листинги и ловит модели, чей флор только что ушёл вниз против своего же уровня. Круг — минуты, историю продаж не качает\n"
         "/watchstop — остановить дозор\n"
         "/colorsprobe <slug> — проверка на одной вещи: скачать её картинку и вынуть цвет фона и цвет модели\n"
-        "/colors [снимков] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма\n"
+        "/colors [снимков] [thin] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма. thin — добрать те, что собрались с одного фона\n"
         "/colorsstop — остановить сбор\n"
         "/colorsbase — что накопила база цветов, файлом\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
@@ -1372,6 +1372,9 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         acc = next((a for a in accounts.values() if not a.paused), None) or \
             next(iter(accounts.values()))
+    words = {a.lower() for a in args}
+    args = [a for a in args if a.lower() != "thin"]
+    redo_thin = "thin" in words
     try:
         per_model = max(1, min(4, int(args[0])))
     except (IndexError, ValueError):
@@ -1403,7 +1406,9 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Запросов к API — по три на коллекцию, картинки идут с телеграма.\n"
         f"Разные фоны на снимках нужны, чтобы отсеять узор: цвета модели "
         f"повторяются, цвета узора меняются вместе с фоном.\n"
-        "Остановить: /colorsstop")
+        + ("Добор: беру только модели, снятые меньше чем с нужного числа фонов, "
+           "и только лоты на фонах, которых у них ещё не было.\n" if redo_thin else "")
+        + "Остановить: /colorsstop")
 
     def offers_for(collection):
         out = []
@@ -1418,7 +1423,7 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def work():
         return colors.collect(
             offers_for, names, per_model=per_model, known=known,
-            on_progress=say, on_save=save_colors,
+            on_progress=say, on_save=save_colors, redo_thin=redo_thin,
             should_stop=lambda: context.bot_data.get("colors_stop"))
 
     try:
