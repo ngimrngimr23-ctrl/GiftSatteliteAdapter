@@ -36,7 +36,11 @@ SHUTDOWN = threading.Event()
 HISTORY_PAGES = 20          # страниц истории на коллекцию, по 20 продаж
 MIN_SALES_PER_MODEL = 6     # меньше — медиана модели ничего не значит
 MIN_SALES_PER_BACKDROP = 8  # меньше — уровень фона ничего не значит
-PAIRS_CAP = 15000           # сколько пар хранить для отчёта
+# Доля совпавшей площади округляется до этого шага, и продажи копятся вёдрами
+# «фон + ведро». Так в хранилище едет одно число на продажу вместо строки с
+# именем фона при каждой, и потолок на объём больше не нужен: при потолке
+# замер выбрасывал бы половину рынка, причём по алфавиту.
+SHARE_STEP = 0.05
 # Полосы по доле совпавшей площади. Верхняя — то, что мы называем сочетанием.
 BANDS = ((0.0, 0.10), (0.10, 0.25), (0.25, 0.40), (0.40, 0.60), (0.60, 1.01))
 
@@ -107,7 +111,8 @@ def collect(client, account, collections: list, colors_base: dict,
         return {"error": "база цветов пуста", "pairs": []}
 
     done = set((known or {}).get("done") or [])
-    pairs = list((known or {}).get("pairs") or [])
+    cells = {name: {int(bucket): list(values) for bucket, values in buckets.items()}
+             for name, buckets in ((known or {}).get("cells") or {}).items()}
     stats = {"collections": 0, "sales": 0, "models": 0, "skipped": 0}
 
     todo = [c for c in collections if c not in done]
@@ -148,22 +153,20 @@ def collect(client, account, collections: list, colors_base: dict,
             stats["models"] += 1
             shares = covers.get((collection, model)) or {}
             for backdrop, price in items:
-                if len(pairs) >= PAIRS_CAP:
-                    break
-                pairs.append([backdrop, round(shares.get(backdrop, 0.0), 3),
-                              round(price / base, 4)])
+                bucket = int(round(shares.get(backdrop, 0.0) / SHARE_STEP))
+                cells.setdefault(backdrop, {}).setdefault(bucket, []).append(
+                    round(price / base, 3))
 
         if on_progress and index % 10 == 0:
             on_progress(f"Замер: {index} из {len(todo)} коллекций, "
-                        f"продаж {stats['sales']}, моделей в счёте {stats['models']}, "
-                        f"пар {len(pairs)}")
+                        f"продаж {stats['sales']}, моделей в счёте {stats['models']}")
         if on_save and index % save_every == 0:
             try:
-                on_save({"ts": time.time(), "done": sorted(done), "pairs": pairs})
+                on_save({"ts": time.time(), "done": sorted(done), "cells": cells})
             except Exception as e:
                 log.warning("не смог сохранить замер на %d-й коллекции: %s", index, e)
 
-    result = {"ts": time.time(), "done": sorted(done), "pairs": pairs}
+    result = {"ts": time.time(), "done": sorted(done), "cells": cells}
     if on_save:
         try:
             on_save(result)
@@ -187,13 +190,18 @@ def summarise(data: dict, match_from: float = 0.5) -> dict:
     целиком, и разница схлопывается в ноль. Такие фоны просто не годятся для
     замера, и здесь они отсеиваются явно, а не портят ответ молча.
     """
-    pairs = (data or {}).get("pairs") or []
-    if not pairs:
-        return {"error": "пар нет — замер не собран"}
+    cells = (data or {}).get("cells") or {}
+    if not cells:
+        return {"error": "продаж нет — замер не собран"}
 
-    by_backdrop = {}
-    for backdrop, share, ratio in pairs:
-        by_backdrop.setdefault(backdrop, []).append((share, ratio))
+    by_backdrop, total = {}, 0
+    for name, buckets in cells.items():
+        items = []
+        for bucket, values in buckets.items():
+            share = int(bucket) * SHARE_STEP
+            items += [(share, value) for value in values]
+        by_backdrop[name] = items
+        total += len(items)
 
     per_backdrop, unusable = [], 0
     for name, items in by_backdrop.items():
@@ -217,8 +225,9 @@ def summarise(data: dict, match_from: float = 0.5) -> dict:
               for name, items in by_backdrop.items()
               if len(items) >= MIN_SALES_PER_BACKDROP
               and statistics.median(r for _, r in items) > 0}
-    rows = [(share, ratio / levels[backdrop])
-            for backdrop, share, ratio in pairs if backdrop in levels]
+    rows = [(share, ratio / levels[name])
+            for name, items in by_backdrop.items() if name in levels
+            for share, ratio in items]
     bands = []
     for lo, hi in BANDS:
         band = [res for share, res in rows if lo <= share < hi]
@@ -232,7 +241,7 @@ def summarise(data: dict, match_from: float = 0.5) -> dict:
     per_backdrop.sort(key=lambda p: -p["premium"])
 
     return {
-        "pairs": len(pairs),
+        "pairs": total,
         "backdrops": len(by_backdrop),
         "usable": len(per_backdrop),
         "unusable": unusable,
