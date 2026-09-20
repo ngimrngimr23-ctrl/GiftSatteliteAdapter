@@ -137,6 +137,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "цены модели; fast — быстрый проход по дешёвому краю, missing — только коллекции, "
         "которых ещё нет в базе\n"
         "/scanstop — прервать идущий скан\n"
+        "/watch [просадка%] [мин_цена] [макс_цена] [all] — дозор: гоняет по кругу одни листинги и ловит модели, чей флор только что ушёл вниз против своего же уровня. Круг — минуты, историю продаж не качает\n"
+        "/watchstop — остановить дозор\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1236,6 +1238,113 @@ async def cmd_scanstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Остановлю после текущей коллекции. Найденное и собранная база сохранятся.")
 
 
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /watch [<acc>] [просадка%] [мин_цена] [макс_цена] [all] — дозор по листингам.
+
+    Скан ищет оферы дешевле цены по сделкам, и история продаж съедает в нём
+    ~14 000 запросов на рынок против 393 на листинги: полный проход выходит
+    часами, а значит на одну коллекцию скан смотрит раз в много часов. Дешёвый
+    лот столько не живёт.
+
+    Дозор историю не трогает вовсе: он гоняет по кругу одни листинги и сравнивает
+    текущий флор модели с её же флором час назад. Круг — минуты, и просадку
+    видно, пока она свежая.
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+    if context.bot_data.get("watch_running"):
+        await update.message.reply_text("Дозор уже идёт. Остановить: /watchstop")
+        return
+
+    args = list(context.args)
+    if args and args[0] in accounts:
+        acc, args = accounts[args[0]], args[1:]
+    else:
+        acc = next((a for a in accounts.values() if not a.paused), None) or \
+            next(iter(accounts.values()))
+
+    words = {a.lower() for a in args}
+    args = [a for a in args if a.lower() not in ("all",)]
+
+    def number(index, default):
+        try:
+            return float(args[index].replace(",", "."))
+        except (IndexError, ValueError):
+            return default
+
+    params = scanner.WatchParams(
+        drop_pct=number(0, 20.0),
+        price_min=number(1, 0.0),
+        price_max=number(2, 0.0),
+        # по умолчанию три основных маркета: круг тем быстрее, чем меньше
+        # запросов, а tg и getgems дают считанные листинги
+        markets=scanner.ALL_MARKETS if "all" in words else scanner.WATCH_MARKETS,
+    )
+    if params.price_max and params.price_max < params.price_min:
+        await update.message.reply_text("Максимальная цена меньше минимальной.")
+        return
+
+    chat_id = update.effective_chat.id
+    loop = asyncio.get_running_loop()
+    context.bot_data["watch_running"] = True
+    context.bot_data["watch_stop"] = False
+
+    def say(text: str):
+        asyncio.run_coroutine_threadsafe(
+            context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
+
+    baseline = await asyncio.to_thread(load_scan_baseline)
+    known = len((baseline or {}).get("collections") or {})
+    if not known:
+        context.bot_data["watch_running"] = False
+        await update.message.reply_text(
+            "База скана пуста — не из чего брать цены по сделкам и не по чему "
+            "отсекать дорогие коллекции. Сначала /scan, хотя бы частично.")
+        return
+
+    def work():
+        return scanner.watch_market(
+            acc.client, acc, params, baseline=baseline,
+            on_finds=lambda collection, finds: say(
+                menu.watch_finds_text(collection, finds)),
+            on_progress=say,
+            on_pass=lambda stats: say(menu.watch_pass_text(stats)),
+            should_stop=lambda: context.bot_data.get("watch_stop"),
+        )
+
+    try:
+        result = await asyncio.to_thread(work)
+    except Exception as e:
+        log.exception("дозор упал")
+        await update.message.reply_text(f"Дозор оборвался: {e}")
+        return
+    finally:
+        context.bot_data["watch_running"] = False
+
+    if result.get("error"):
+        await update.message.reply_text(f"Дозор не стартовал: {result['error']}")
+        return
+    await update.message.reply_text(
+        f"👁 Дозор остановлен. Кругов {result['passes']}, "
+        f"просадок найдено {result['finds']}.")
+
+
+async def cmd_watchstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/watchstop — остановить дозор после текущей коллекции."""
+    if not authorized(update):
+        return
+    if not context.bot_data.get("watch_running"):
+        await update.message.reply_text("Дозор сейчас не идёт.")
+        return
+    context.bot_data["watch_stop"] = True
+    await update.message.reply_text("Остановлю после текущей коллекции.")
+
+
 async def cmd_forceupdate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /forceupdate         — пересчитать цены сразу для ВСЕХ аккаунтов (кроме тех, что на паузе)
@@ -1463,6 +1572,8 @@ BOT_COMMANDS = [
     ("monochrome", "Пары подарок+фон: где больше всего моделей в один floor"),
     ("scan", "Скан рынка: листинги ниже реальной цены модели"),
     ("scanstop", "Прервать идущий скан"),
+    ("watch", "Дозор: свежие просадки флора"),
+    ("watchstop", "Остановить дозор"),
     ("scanbase", "Что накопила база скана"),
     ("scanpublish", "Выложить базу скана в GitHub"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -1524,6 +1635,8 @@ def main():
     # случай: /scanstop молчал, потому что ждал окончания /scan
     app.add_handler(CommandHandler("scan", cmd_scan, block=False))
     app.add_handler(CommandHandler("scanstop", cmd_scanstop, block=False))
+    app.add_handler(CommandHandler("watch", cmd_watch, block=False))
+    app.add_handler(CommandHandler("watchstop", cmd_watchstop, block=False))
     app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
     app.add_handler(CommandHandler("scanpublish", cmd_scanpublish, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))

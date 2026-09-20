@@ -457,3 +457,257 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
         "skipped": skipped,
         "requests": getattr(client, "total_requests", 0) - started_requests,
     }
+
+
+# --- Дозор ------------------------------------------------------------------
+#
+# Скан ищет оферы дешевле цены по сделкам и на это тратит часы: история —
+# ~14 000 запросов на рынок, листинги — всего 393. Полный проход выходит
+# ~15 часов, то есть на каждую коллекцию скан смотрит раз в 15 часов, а дешёвый
+# лот живёт минуты. Поймать просадку при таком темпе нельзя в принципе.
+#
+# Дозор делает ровно обратное: историю не трогает совсем, гоняет по кругу одни
+# листинги и сравнивает текущий флор модели с её же флором час назад. Просадка
+# в чистом виде, без опорной цены по сделкам — и круг занимает минуты, а не часы.
+
+WATCH_MARKETS = ("portals", "tonnel", "mrkt")
+
+
+@dataclass
+class WatchParams:
+    """Настройки дозора."""
+    drop_pct: float = 20.0          # насколько флор должен просесть против своего уровня
+    price_min: float = 0.0
+    price_max: float = 0.0
+    markets: tuple = WATCH_MARKETS
+    # Сколько держим замеров флора. Уровень — медиана по ним: один просевший
+    # замер среди двух десятков медиану не двигает, и находка не «съедает» сама
+    # себя на следующем круге.
+    memory_hours: float = 12.0
+    min_samples: int = 3            # меньше — уровню не верим, идёт прогрев
+    repeat_hours: float = 6.0       # один и тот же лот не показываем чаще
+    # До какого возраста доверяем цене по сделкам из базы скана. Она тут не
+    # критерий, а страховка: лот дешевле вчерашнего флора, но дороже реальных
+    # сделок — это не просадка, а возврат к норме после дорогого лота.
+    ref_max_age_h: float = 72.0
+    # Коллекции, чей флор в базе заведомо выше верхней границы, не опрашиваем.
+    # С запасом: флор мог уехать вниз как раз из-за просадки.
+    skip_factor: float = 2.0
+    illiquid_per_month: float = 4.0
+    illiquid_factor: float = 1.3
+    pause_seconds: float = 0.0      # пауза между кругами
+
+
+def watch_collections(client, account, baseline, params: WatchParams) -> list:
+    """Какие коллекции обходить: всё, что есть в базе, минус заведомо дорогие."""
+    stored = (baseline or {}).get("collections") or {}
+    names = sorted(stored)
+    if not names:
+        try:
+            names = sorted(c["name"] for c in (client.get_collections() or [])
+                           if isinstance(c, dict) and c.get("name"))
+        except ApiError as e:
+            account.record_error(f"watch collections: {e}")
+            return []
+    if params.price_max and params.skip_factor:
+        limit = params.price_max * params.skip_factor
+        names = [n for n in names
+                 if not ((stored.get(n) or {}).get("floor") or 0) > limit]
+    return names
+
+
+def _watch_offers(client, account, collection: str, params: WatchParams) -> list:
+    """Дешёвый край коллекции по всем маркетам — один запрос на маркет."""
+    offers = []
+    for market in params.markets:
+        if SHUTDOWN.is_set():
+            break
+        try:
+            listings = client.search_market(market, collection)
+        except ApiError as e:
+            account.record_error(f"watch search {market}/{collection}: {e}")
+            continue
+        offers += _offers_from_listings(listings, market)
+    return offers
+
+
+def _floor_by_track(offers: list, params: WatchParams) -> dict:
+    """
+    Самый дешёвый офер по каждой паре «модель + чёрный/не чёрный».
+
+    Чёрные фоны ведём отдельной дорожкой: они дороже обычных в разы, и один
+    чёрный лот среди обычных то поднимал бы уровень, то ронял — просадка
+    мерещилась бы на ровном месте.
+    """
+    best = {}
+    for offer in offers:
+        price = offer["price"]
+        if price <= 0:
+            continue
+        if params.price_min and price < params.price_min:
+            continue
+        if params.price_max and price > params.price_max:
+            continue
+        key = (offer["model"], is_black(offer["backdrop"]))
+        cur = best.get(key)
+        if cur is None or price < cur["price"]:
+            best[key] = offer
+    return best
+
+
+def _sane_against_sales(offer: dict, known: dict, premiums: dict,
+                        ref_fresh: bool) -> tuple[bool, float | None]:
+    """
+    Не возврат ли это к норме. Флор мог стоять высоко просто потому, что
+    дешёвые лоты разобрали и остался один дорогой; новый обычный лот тогда
+    «просаживает» флор, ничего при этом не стоя дешевле реальных сделок.
+
+    Возвращает (брать ли, насколько дешевле цены по сделкам).
+    """
+    ref = (known or {}).get("ref")
+    if not ref_fresh or not ref or ref <= 0:
+        return True, None          # сравнить не с чем — верим просадке как есть
+    expected = ref
+    if is_black(offer["backdrop"]):
+        info = (premiums or {}).get("Onyx Black" if "onyx" in offer["backdrop"].lower()
+                                    else "Black")
+        if not info or not info.get("k"):
+            return True, None      # надбавки за чёрный не знаем — не судим
+        expected = ref * info["k"]
+    if expected <= 0:
+        return True, None
+    return offer["price"] < expected, (1 - offer["price"] / expected) * 100
+
+
+def watch_market(client, account, params: WatchParams, baseline=None,
+                 on_finds=None, on_progress=None, should_stop=None,
+                 on_pass=None, max_passes: int = 0) -> dict:
+    """
+    Бесконечный круг по листингам. Находка — модель, чей флор ушёл ниже своего
+    же уровня за последние часы.
+
+    on_finds(коллекция, находки) зовётся сразу, не дожидаясь конца круга:
+    смысл дозора в том, чтобы сказать быстро.
+    """
+    stored = (baseline or {}).get("collections") or {}
+    names = watch_collections(client, account, baseline, params)
+    if not names:
+        return {"error": "не из чего строить обход", "passes": 0}
+
+    levels: dict = {}     # (коллекция, модель, чёрный) -> [(когда, флор)]
+    reported: dict = {}   # лот -> когда показали
+    passes = 0
+    total_finds = 0
+    if on_progress:
+        on_progress(
+            f"👁 Дозор запущен.\n"
+            f"Коллекций в обходе: {len(names)}, маркетов {len(params.markets)}.\n"
+            f"Ищу просадку флора от {params.drop_pct:g}% против уровня за "
+            f"последние {params.memory_hours:g} ч.\n"
+            f"Первые {params.min_samples} круга — прогрев: набираю уровни, "
+            f"находок не будет.\n"
+            f"Остановить: /watchstop")
+
+    while not SHUTDOWN.is_set() and not (should_stop and should_stop()):
+        passes += 1
+        started = time.time()
+        req0 = getattr(client, "total_requests", 0)
+        pass_finds = warming = skipped_norm = 0
+
+        for collection in names:
+            if SHUTDOWN.is_set() or (should_stop and should_stop()):
+                break
+            offers = _watch_offers(client, account, collection, params)
+            if not offers:
+                continue
+            snapshot = stored.get(collection) or {}
+            known_models = snapshot.get("models") or {}
+            premiums = snapshot.get("premiums_full") or {}
+            ref_fresh = time.time() - snapshot.get("ts", 0) <= params.ref_max_age_h * 3600
+
+            now = time.time()
+            finds = []
+            for (model, black), offer in _floor_by_track(offers, params).items():
+                key = (collection, model, black)
+                history = [(ts, price) for ts, price in levels.get(key, ())
+                           if now - ts <= params.memory_hours * 3600]
+                known = known_models.get(model) or {}
+                # уровень считаем по прошлым замерам, текущий в него не входит —
+                # иначе просадка сравнивалась бы сама с собой
+                if len(history) < params.min_samples:
+                    warming += 1
+                else:
+                    level = statistics.median(p for _, p in history)
+                    drop = (1 - offer["price"] / level) * 100 if level > 0 else 0.0
+                    per_month = known.get("per_month")
+                    required = params.drop_pct
+                    illiquid = per_month is not None and per_month < params.illiquid_per_month
+                    if illiquid:
+                        required *= params.illiquid_factor
+                    if drop + 1e-9 >= required:
+                        ok, vs_ref = _sane_against_sales(offer, known, premiums, ref_fresh)
+                        if not ok:
+                            skipped_norm += 1
+                        else:
+                            hit = dict(offer)
+                            age_h = (now - min(ts for ts, _ in history)) / 3600
+                            hit.update({
+                                "collection": collection,
+                                "expected": level,
+                                "benefit": drop,
+                                "required": required,
+                                "illiquid": illiquid,
+                                "per_month": per_month,
+                                "model_ref": known.get("ref"),
+                                "rarity": known.get("rarity"),
+                                "vs_ref": vs_ref,
+                                "samples": len(history),
+                                "level_age_h": age_h,
+                                "rule": (f"флор был {level:.2f} — {len(history)} "
+                                         f"замеров за {age_h:.0f} ч"),
+                            })
+                            finds.append(hit)
+                history.append((now, offer["price"]))
+                levels[key] = history
+
+            if finds:
+                fresh = []
+                for hit in finds:
+                    lot = (hit["market"], hit.get("slug") or hit.get("link") or hit["model"],
+                           round(hit["price"], 2))
+                    if now - reported.get(lot, 0) < params.repeat_hours * 3600:
+                        continue
+                    reported[lot] = now
+                    fresh.append(hit)
+                if fresh:
+                    fresh.sort(key=lambda f: -f["benefit"])
+                    pass_finds += len(fresh)
+                    total_finds += len(fresh)
+                    if on_finds:
+                        on_finds(collection, fresh)
+
+        # чистим хвосты, иначе за сутки словарь распухнет на весь рынок
+        now = time.time()
+        levels = {k: v for k, v in levels.items()
+                  if v and now - v[-1][0] <= params.memory_hours * 3600}
+        reported = {k: ts for k, ts in reported.items()
+                    if now - ts <= params.repeat_hours * 3600}
+
+        stats = {
+            "pass": passes,
+            "seconds": now - started,
+            "requests": getattr(client, "total_requests", 0) - req0,
+            "finds": pass_finds,
+            "warming": warming,
+            "skipped_norm": skipped_norm,
+            "tracks": len(levels),
+            "collections": len(names),
+        }
+        if on_pass:
+            on_pass(stats)
+        if max_passes and passes >= max_passes:
+            break
+        if params.pause_seconds and not SHUTDOWN.is_set():
+            SHUTDOWN.wait(params.pause_seconds)
+
+    return {"passes": passes, "finds": total_finds, "collections": len(names)}

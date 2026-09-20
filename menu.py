@@ -936,3 +936,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     log.warning("неизвестное действие меню: %s", query.data)
+
+
+def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
+    """Просадки, найденные дозором. Уходят в чат сразу, круг не дожидается."""
+    lines = [f"⚡ {collection} — просадок {len(finds)}"]
+    for f in finds[:limit]:
+        tag = " ⚠️неликвид" if f.get("illiquid") else ""
+        backdrop = f" · {f['backdrop']}" if f.get("backdrop") else ""
+        vs_ref = f.get("vs_ref")
+        lines.append(
+            f"• {f['model']}{backdrop} — {f['price']:.2f}, было {f['expected']:.2f} "
+            f"(−{f['benefit']:.0f}%){tag}\n"
+            f"   {f['market']} · {f['rule']}"
+            + (f"\n   дешевле цены по сделкам на {vs_ref:.0f}%" if vs_ref is not None else "")
+            + (f" · сделок/мес {f['per_month']:.0f}" if f.get("per_month") else "")
+            + (f"\n   {offer_link(f)}" if offer_link(f) else "")
+        )
+    if len(finds) > limit:
+        lines.append(f"…и ещё {len(finds) - limit}")
+    return "\n".join(lines)
+
+
+def watch_pass_text(stats: dict) -> str:
+    """Итог круга дозора — одной строкой."""
+    minutes = stats["seconds"] / 60
+    out = (f"👁 круг {stats['pass']}: {stats['collections']} коллекций за "
+           f"{minutes:.0f} мин, запросов {stats['requests']}, "
+           f"просадок {stats['finds']}")
+    if stats.get("warming"):
+        out += f", прогревается {stats['warming']} моделей"
+    if stats.get("skipped_norm"):
+        out += f", отсеяно как возврат к норме {stats['skipped_norm']}"
+    return out
