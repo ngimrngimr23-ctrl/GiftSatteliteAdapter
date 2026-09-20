@@ -21,6 +21,7 @@ from state import (AccountState, load_persisted, save_persisted, load_global_set
 from updater import run_cycle, fetch_sales_for
 import monochrome
 import scanner
+import github_sync
 
 load_dotenv()
 
@@ -137,6 +138,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "которых ещё нет в базе\n"
         "/scanstop — прервать идущий скан\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
+        "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
@@ -1163,6 +1165,13 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Не удалось получить список коллекций: {result['error']}")
         return
 
+    if github_sync.enabled():
+        baseline = await asyncio.to_thread(load_scan_baseline)
+        note = await asyncio.to_thread(
+            github_sync.publish, menu.scan_baseline_csv(baseline),
+            f"скан: {len((baseline or {}).get('collections') or {})} коллекций")
+        await update.message.reply_text(note)
+
     await update.message.reply_text(menu.scan_summary_text(result, params))
     finds = result.get("finds") or []
     if finds:
@@ -1182,6 +1191,30 @@ async def cmd_scanbase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = BytesIO(("\ufeff" + menu.scan_baseline_csv(baseline)).encode("utf-8"))
     data.name = f"scanbase_{datetime.now():%Y-%m-%d_%H%M}.csv"
     await update.message.reply_document(document=data, filename=data.name)
+
+
+async def cmd_scanpublish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scanpublish — выложить базу скана в GitHub, чтобы её можно было посмотреть со стороны."""
+    if not authorized(update):
+        return
+    if not github_sync.enabled():
+        await update.message.reply_text(
+            "Выгрузка не настроена. Нужны переменные окружения:\n"
+            "GITHUB_SYNC_TOKEN — токен с правом записи в репозиторий\n"
+            "GITHUB_SYNC_REPO — owner/repo\n\n"
+            "Уезжает только база скана (цены и надбавки за фоны). "
+            "Настройки аккаунтов с токенами не отправляются никогда."
+        )
+        return
+    baseline = await asyncio.to_thread(load_scan_baseline)
+    if not (baseline or {}).get("collections"):
+        await update.message.reply_text("База скана пуста — выгружать нечего.")
+        return
+    await update.message.reply_text("Выгружаю базу...")
+    note = await asyncio.to_thread(
+        github_sync.publish, menu.scan_baseline_csv(baseline),
+        f"скан: {len(baseline['collections'])} коллекций")
+    await update.message.reply_text(note)
 
 
 async def cmd_scanstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1424,6 +1457,7 @@ BOT_COMMANDS = [
     ("scan", "Скан рынка: листинги ниже реальной цены модели"),
     ("scanstop", "Прервать идущий скан"),
     ("scanbase", "Что накопила база скана"),
+    ("scanpublish", "Выложить базу скана в GitHub"),
     ("forceupdate", "Пересчитать цены сейчас"),
     ("setinterval", "Как часто (в минутах) проверяются цены"),
     ("pause", "Остановить конкретный аккаунт"),
@@ -1484,6 +1518,7 @@ def main():
     app.add_handler(CommandHandler("scan", cmd_scan, block=False))
     app.add_handler(CommandHandler("scanstop", cmd_scanstop, block=False))
     app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
+    app.add_handler(CommandHandler("scanpublish", cmd_scanpublish, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))
