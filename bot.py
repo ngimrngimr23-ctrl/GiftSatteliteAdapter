@@ -1541,6 +1541,7 @@ async def cmd_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         min_coverage=number(3, colors.MATCH_MIN_COVERAGE * 100) / 100,
         tol=number(4, colors.MATCH_TOL),
     )
+    await update.message.reply_text("Читаю базу цветов…")
     base = await asyncio.to_thread(load_colors)
     if not (base or {}).get("backdrops"):
         await update.message.reply_text(
@@ -1617,6 +1618,10 @@ async def cmd_matchtable(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     min_coverage = number(0, colors.MATCH_MIN_COVERAGE * 100) / 100
     tol = number(1, colors.MATCH_TOL)
+    # Отвечаем до расчёта, а не после: пар «цвет модели × фон» два с половиной
+    # миллиона, и раньше команда молчала до самого результата.
+    await update.message.reply_text(
+        f"Подбираю: не меньше {min_coverage * 100:.0f}% площади при ΔE {tol:g}…")
     base = await asyncio.to_thread(load_colors)
     table = await asyncio.to_thread(colors.matching_table, base,
                                     colors.MATCH_TOP, tol, min_coverage)

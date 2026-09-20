@@ -677,10 +677,16 @@ def matching_table(base: dict, top: int = MATCH_TOP, tol: float = MATCH_TOL,
 
     Модели, у которых ни один фон не покрывает min_coverage площади, в таблицу
     не попадают: подбирать им нечего.
+
+    Перевод цвета в Lab вынесен наружу обоих циклов. Пар «цвет модели × фон»
+    выходит два с половиной миллиона, и пересчёт внутри цикла стоил одиннадцать
+    секунд — команда всё это время молчала.
     """
     backdrops = backdrop_colors(base)
     if not backdrops:
         return {}
+    ready = [(name, rgb, rgb_to_lab(rgb)) for name, rgb in backdrops.items()]
+    limit = tol * tol   # сравниваем квадраты: корень в горячем цикле не нужен
     out = {}
     for collection, models in ((base or {}).get("models") or {}).items():
         if not isinstance(models, dict):
@@ -690,12 +696,24 @@ def matching_table(base: dict, top: int = MATCH_TOP, tol: float = MATCH_TOL,
             colour = key_color(palette)
             if not colour:
                 continue
-            near = best_backdrops(palette, backdrops, top, tol,
-                                  min_coverage, require_key)
+            entries = [(p.get("share", 0), rgb_to_lab(p["rgb"])) for p in palette]
+            key_lab = rgb_to_lab(colour["rgb"])
+            near = []
+            for name, rgb, lab in ready:
+                share = sum(s for s, pl in entries
+                            if (pl[0] - lab[0]) ** 2 + (pl[1] - lab[1]) ** 2
+                            + (pl[2] - lab[2]) ** 2 <= limit)
+                if share < min_coverage:
+                    continue
+                delta = math.sqrt(sum((a - b) ** 2 for a, b in zip(key_lab, lab)))
+                if require_key and delta > tol:
+                    continue
+                near.append((name, share, delta))
             if near:
+                near.sort(key=lambda item: -item[1])
                 out[(collection, model)] = {
                     "rgb": tuple(colour["rgb"]),
                     "samples": (info or {}).get("samples", 0),
-                    "backdrops": near,
+                    "backdrops": near[:top],
                 }
     return out
