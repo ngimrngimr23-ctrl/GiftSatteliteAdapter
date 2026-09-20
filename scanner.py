@@ -283,6 +283,10 @@ def scan_collection(client, collection: str, account, params: ScanParams,
 
     excluded = set(_BLACK_LOWER)  # чёрные сделки не идут в «нормальную» цену модели
     models_data, finds = {}, []
+    # Самый дешёвый текущий офер по каждой модели — кладём в базу. Без него
+    # нельзя посчитать главное: насколько аски на рынке отстоят от цен, по
+    # которым вещи реально уходят, а от этого зависит, бывают ли находки вообще.
+    cheapest = _cheapest_per_model(offers)
     known_models = (known or {}).get("models") or {}
     # Историю — самую дорогую часть прохода — качаем только для моделей, у
     # которых есть офер внутри ценового окна. У остальных находки быть не может
@@ -316,6 +320,11 @@ def scan_collection(client, collection: str, account, params: ScanParams,
                 "used": stats["used"] if stats else 0,
                 "rarity": catalog.get(model),
             }
+        best_offer = cheapest.get(model)
+        if best_offer:
+            models_data[model]["offer"] = best_offer["price"]
+            models_data[model]["offer_backdrop"] = best_offer["backdrop"]
+            models_data[model]["offer_market"] = best_offer["market"]
         for offer in offers:
             if offer["model"] != model or not in_window(offer["price"]):
                 continue

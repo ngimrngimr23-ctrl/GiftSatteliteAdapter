@@ -451,12 +451,34 @@ def scan_baseline_text(baseline: dict) -> str:
         if ks[name]:
             lines.append(f"Надбавка за {name}: медиана ×{statistics.median(ks[name]):.2f} "
                          f"(по {len(ks[name])} коллекциям)")
+
+    # Главное число: насколько лоты на рынке отстоят от цен реальных сделок.
+    # Если лоты в массе дороже сделок, находка — это не «чуть ниже среднего», а
+    # разворот рынка, и их и должно быть мало.
+    gaps = []
+    for snap in collections.values():
+        for data in ((snap or {}).get("models") or {}).values():
+            if not isinstance(data, dict):
+                continue
+            ref, offer = data.get("ref"), data.get("offer")
+            if ref and offer:
+                gaps.append(offer / ref)
+    if gaps:
+        cheaper = sum(1 for g in gaps if g < 1)
+        lines += ["",
+                  f"Лот против цены по сделкам (по {len(gaps)} моделям):",
+                  f"  медиана ×{statistics.median(gaps):.2f}",
+                  f"  дешевле сделок: {cheaper} ({cheaper / len(gaps):.0%})",
+                  f"  дешевле на 13%+: "
+                  f"{sum(1 for g in gaps if g <= 0.87)} "
+                  f"({sum(1 for g in gaps if g <= 0.87) / len(gaps):.0%})"]
     return "\n".join(lines)
 
 
 def scan_baseline_csv(baseline: dict) -> str:
     """Вся база файлом: по строке на модель."""
-    rows = ["коллекция;модель;цена по сделкам;сделок в месяц;сделок в расчёте;"
+    rows = ["коллекция;модель;цена по сделкам;цена офера;офер к сделкам;фон офера;маркет;"
+            "сделок в месяц;сделок в расчёте;"
             "редкость %;floor коллекции;K Black;K Onyx Black;возраст записи, ч"]
 
     def num(value, digits=2):
@@ -476,9 +498,14 @@ def scan_baseline_csv(baseline: dict) -> str:
             if not isinstance(data, dict):
                 continue
             rarity = data.get("rarity")
+            ref, offer = data.get("ref"), data.get("offer")
             rows.append(";".join([
                 collection.replace(";", ","), model.replace(";", ","),
-                num(data.get("ref")), num(data.get("per_month"), 1),
+                num(ref), num(offer),
+                num(offer / ref, 2) if ref and offer else "",
+                str(data.get("offer_backdrop") or "").replace(";", ","),
+                str(data.get("offer_market") or ""),
+                num(data.get("per_month"), 1),
                 str(data.get("used", "")),
                 num(rarity / 10, 1) if rarity is not None else "",
                 num(snap.get("floor")), num(k_black), num(k_onyx), num(age, 1),
