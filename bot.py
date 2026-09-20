@@ -18,11 +18,12 @@ from api_client import GiftApiClient, HISTORY_PAGE_SIZE
 from state import (AccountState, load_persisted, save_persisted, load_global_settings,
                    save_global_settings, storage_status, load_scan_baseline,
                    load_watch_levels, save_watch_levels,
-                   load_colors, save_colors,
+                   load_colors, save_colors, load_premium, save_premium,
                    save_scan_baseline)
 from updater import run_cycle, fetch_sales_for
 import monochrome
 import colors
+import premium
 import scanner
 import github_sync
 
@@ -149,6 +150,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/match [допуск%] [мин_цена] [макс_цена] [совпадение%] [ΔE] — лоты, где фон подходит модели по цвету, а цена как у обычной. совпадение% — сколько площади модели должно совпасть с фоном\n"
         "/matchstop — остановить поиск\n"
         "/matchtable [совпадение%] [ΔE] — подборка: какой фон какой модели подходит. Заданные пороги запоминаются, /match берёт их же. Запросов не делает\n"
+        "/premium [страниц] — замер: платит ли рынок за совпадение цвета фона с моделью. Одно число, по нему видно, есть ли смысл в /match\n"
+        "/premiumstop — остановить замер\n"
+        "/premiumbase — ответ по уже собранному, без запросов\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1502,6 +1506,116 @@ async def _send_colors_file(update: Update, base: dict):
         await update.message.reply_text(note)
 
 
+async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /premium [<acc>] [страниц] — замерить, платит ли рынок за совпадение цвета
+    фона с моделью.
+
+    Это проверка предпосылки, а не поиск лотов. Один раз мы уже искали «лоты без
+    наценки за сочетание», не убедившись, что наценка существует, и получили
+    мусор. Здесь выходит одно число, и по нему видно, есть ли смысл в остальном.
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+    if context.bot_data.get("premium_running"):
+        await update.message.reply_text("Замер уже идёт. Остановить: /premiumstop")
+        return
+
+    args = list(context.args)
+    if args and args[0] in accounts:
+        acc, args = accounts[args[0]], args[1:]
+    else:
+        acc = next((a for a in accounts.values() if not a.paused), None) or \
+            next(iter(accounts.values()))
+    try:
+        pages = max(1, min(40, int(args[0])))
+    except (IndexError, ValueError):
+        pages = premium.HISTORY_PAGES
+
+    await update.message.reply_text("Читаю базы…")
+    base = await asyncio.to_thread(load_colors)
+    if not (base or {}).get("models"):
+        await update.message.reply_text("База цветов пуста. Сначала /colors")
+        return
+    known = await asyncio.to_thread(load_premium)
+    saved = await asyncio.to_thread(load_scan_baseline)
+    names = sorted((saved or {}).get("collections") or {})
+    if not names:
+        names = sorted((base.get("models") or {}))
+
+    chat_id = update.effective_chat.id
+    loop = asyncio.get_running_loop()
+    context.bot_data["premium_running"] = True
+    context.bot_data["premium_stop"] = False
+
+    def say(text: str):
+        asyncio.run_coroutine_threadsafe(
+            context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
+
+    def work():
+        return premium.collect(
+            acc.client, acc, names, base, pages=pages,
+            tol=_match_settings(context)["tol"], known=known,
+            on_progress=say, on_save=save_premium,
+            should_stop=lambda: context.bot_data.get("premium_stop"))
+
+    try:
+        result = await asyncio.to_thread(work)
+    except Exception as e:
+        log.exception("замер упал")
+        await update.message.reply_text(f"Замер оборвался: {e}")
+        return
+    finally:
+        context.bot_data["premium_running"] = False
+
+    if result.get("error"):
+        await update.message.reply_text(f"Не получилось: {result['error']}")
+        return
+    await _send_premium(update, result, _match_settings(context))
+
+
+async def cmd_premiumstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/premiumstop — остановить замер. Собранное сохранится."""
+    if not authorized(update):
+        return
+    if not context.bot_data.get("premium_running"):
+        await update.message.reply_text("Замер сейчас не идёт.")
+        return
+    context.bot_data["premium_stop"] = True
+    await update.message.reply_text(
+        "Остановлю после текущей коллекции. Пройденное сохранится, "
+        "следующий /premium продолжит с того же места.")
+
+
+async def cmd_premiumbase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/premiumbase — ответ по уже собранному, без единого запроса."""
+    if not authorized(update):
+        return
+    data = await asyncio.to_thread(load_premium)
+    if not (data or {}).get("pairs"):
+        await update.message.reply_text("Замер ещё не собран. Запустить: /premium")
+        return
+    await _send_premium(update, data, _match_settings(context))
+
+
+async def _send_premium(update: Update, data: dict, settings: dict):
+    summary = premium.summarise(data, match_from=settings["coverage"])
+    stats = data.get("stats") or {}
+    head = ""
+    if stats:
+        head = (f"Пройдено коллекций: {stats.get('collections', 0)}, "
+                f"продаж прочитано: {stats.get('sales', 0)}\n\n")
+    await update.message.reply_text(head + menu.premium_text(summary))
+    if summary.get("per_backdrop"):
+        out = BytesIO(("\ufeff" + menu.premium_csv(summary)).encode("utf-8"))
+        out.name = f"premium_{datetime.now():%Y-%m-%d_%H%M}.csv"
+        await update.message.reply_document(document=out, filename=out.name)
+
+
 def _match_settings(context) -> dict:
     """Пороги подбора фонов: что задали последним через /matchtable."""
     return {
@@ -1955,6 +2069,9 @@ BOT_COMMANDS = [
     ("match", "Подходящий фон без наценки"),
     ("matchstop", "Остановить поиск сочетаний"),
     ("matchtable", "Какой фон какой модели подходит"),
+    ("premium", "Замер: платят ли за совпадение цвета"),
+    ("premiumstop", "Остановить замер"),
+    ("premiumbase", "Ответ замера по собранному"),
     ("scanbase", "Что накопила база скана"),
     ("scanpublish", "Выложить базу скана в GitHub"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -1977,6 +2094,10 @@ async def _post_shutdown(app: Application):
     if not scanner.SHUTDOWN.is_set():
         scanner.SHUTDOWN.set()
         log.info("останавливаю скан: процесс гасится")
+    # сбор цветов и замер живут в тех же потоках пула и точно так же пережили
+    # бы деплой, продолжая ходить в сеть уже без связи с телеграмом
+    colors.SHUTDOWN.set()
+    premium.SHUTDOWN.set()
 
 
 async def _post_init(app: Application):
@@ -2028,6 +2149,9 @@ def main():
     app.add_handler(CommandHandler("match", cmd_match, block=False))
     app.add_handler(CommandHandler("matchstop", cmd_matchstop, block=False))
     app.add_handler(CommandHandler("matchtable", cmd_matchtable, block=False))
+    app.add_handler(CommandHandler("premium", cmd_premium, block=False))
+    app.add_handler(CommandHandler("premiumstop", cmd_premiumstop, block=False))
+    app.add_handler(CommandHandler("premiumbase", cmd_premiumbase, block=False))
     app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
     app.add_handler(CommandHandler("scanpublish", cmd_scanpublish, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))

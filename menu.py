@@ -1091,3 +1091,53 @@ def match_table_csv(table: dict) -> str:
                 f"{share * 100:.0f}", f"{delta:.1f}".replace(".", ","),
             ]))
     return "\n".join(rows)
+
+
+def premium_text(summary: dict) -> str:
+    """Ответ замера: платит ли рынок за совпадение цвета фона с моделью."""
+    if summary.get("error"):
+        return f"Замер не готов: {summary['error']}"
+    answer = summary.get("premium_pct")
+    lines = ["📐 Надбавка за совпадение цвета фона с моделью"]
+    if answer is None:
+        lines.append("\nПосчитать не удалось: ни у одного фона не набралось продаж "
+                     "и на совпадающих моделях, и на прочих.")
+    else:
+        lines.append(f"\n➡️  {answer:+.1f}%\n")
+        if abs(answer) < 3:
+            lines.append("Это ноль. Рынок за сочетание цвета не платит — "
+                         "искать «лоты без наценки» бессмысленно, наценки нет ни у кого.")
+        elif answer > 0:
+            lines.append(f"Вещь с подходящим фоном уходит дороже обычной такой же "
+                         f"на {answer:.0f}%.")
+        else:
+            lines.append("Отрицательная: с подходящим фоном уходит ДЕШЕВЛЕ. "
+                         "Либо рынку это не нравится, либо замер что-то ловит не то.")
+    lines.append(f"\nСчитано по {summary['pairs']} продажам, "
+                 f"фонов в счёте {summary['usable']} из {summary['backdrops']}")
+    if summary.get("unusable"):
+        lines.append(f"Не пригодилось фонов: {summary['unusable']} — у них не набралось "
+                     f"продаж в обеих половинах сразу")
+    lines.append(f"Совпавших продаж {summary['matched_n']}, обычных {summary['plain_n']}")
+
+    if summary.get("bands"):
+        lines.append("\nПо доле совпавшей площади (1.00 = как обычная вещь):")
+        for band in summary["bands"]:
+            lines.append(f"   {band['lo']*100:3.0f}-{band['hi']*100:3.0f}%  "
+                         f"n={band['n']:5d}  {band['median']:.3f}")
+    top = summary.get("per_backdrop") or []
+    if top:
+        lines.append("\nГде сочетание ценят больше всего:")
+        for p in top[:6]:
+            lines.append(f"   {p['backdrop']:18s} {p['premium']:+6.1f}%  "
+                         f"({p['matched']} против {p['plain']})")
+    return "\n".join(lines)
+
+
+def premium_csv(summary: dict) -> str:
+    rows = ["фон;надбавка %;совпавших продаж;обычных продаж"]
+    for p in summary.get("per_backdrop") or []:
+        rows.append(";".join([str(p["backdrop"]).replace(";", ","),
+                              f"{p['premium']:.1f}".replace(".", ","),
+                              str(p["matched"]), str(p["plain"])]))
+    return "\n".join(rows)

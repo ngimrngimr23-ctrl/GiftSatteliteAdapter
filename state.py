@@ -24,6 +24,9 @@ LEVELS_REDIS_KEY = os.environ.get("REDIS_LEVELS_KEY", "giftadapter:levels")
 COLORS_STATE_FILE = "colors.json"  # фолбэк для локальной разработки
 COLORS_REDIS_KEY = os.environ.get("REDIS_COLORS_KEY", "giftadapter:colors")
 
+PREMIUM_STATE_FILE = "premium.json"  # фолбэк для локальной разработки
+PREMIUM_REDIS_KEY = os.environ.get("REDIS_PREMIUM_KEY", "giftadapter:premium")
+
 
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -317,3 +320,17 @@ def save_colors(data: dict):
         _save_to_upstash_key(COLORS_REDIS_KEY, data)
         return
     _save_to_file_path(COLORS_STATE_FILE, data)
+
+
+def load_premium() -> dict:
+    """Замер надбавки за совпадение цвета: пары «совпадение -> доля цены»."""
+    if _UPSTASH_ENABLED:
+        return _load_from_upstash_key(PREMIUM_REDIS_KEY)
+    return _load_from_file_path(PREMIUM_STATE_FILE)
+
+
+def save_premium(data: dict):
+    if _UPSTASH_ENABLED:
+        _save_to_upstash_key(PREMIUM_REDIS_KEY, data)
+        return
+    _save_to_file_path(PREMIUM_STATE_FILE, data)
