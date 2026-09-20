@@ -1138,7 +1138,14 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # рынка, и коллекции, которых он не касался, терять нельзя
         merged = dict((saved or {}).get("collections") or {})
         merged.update(collected)
-        save_scan_baseline({"ts": time.time(), "collections": merged})
+        full = {"ts": time.time(), "collections": merged}
+        save_scan_baseline(full)
+        # заодно выкладываем в GitHub, но не чаще раза в пять минут: каждая
+        # выгрузка — коммит, и на длинном проходе их набежали бы сотни
+        note = github_sync.publish_throttled(
+            menu.scan_baseline_csv(full), f"скан: {len(merged)} коллекций")
+        if note and not note.startswith("Выгружено"):
+            log.warning("выгрузка базы: %s", note)
 
     def work():
         acc.client.request_count = 0

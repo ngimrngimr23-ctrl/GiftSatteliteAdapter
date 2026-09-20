@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -32,8 +33,35 @@ _SECRET_HINTS = re.compile(
     r"api[_-]?token|\bsecret\b|\bpassword\b|bot\d{6,}:[A-Za-z0-9_-]{30,}", re.I)
 
 
+# Не чаще раза в столько секунд. Каждая выгрузка — это коммит, и без паузы
+# длинный скан наплодил бы их сотни.
+MIN_PUBLISH_INTERVAL = 300.0
+_last_publish = 0.0
+_last_payload = ""
+
+
 def enabled() -> bool:
     return bool(TOKEN and REPO)
+
+
+def publish_throttled(text: str, message: str) -> str | None:
+    """
+    Выгрузить, если с прошлого раза прошло достаточно времени и данные
+    изменились. Возвращает None, когда выгрузка пропущена — звать можно часто.
+    """
+    global _last_publish, _last_payload
+    if not enabled():
+        return None
+    now = time.monotonic()
+    if now - _last_publish < MIN_PUBLISH_INTERVAL:
+        return None
+    if text == _last_payload:
+        return None  # данные не менялись — коммит был бы пустым
+    _last_publish = now
+    result = publish(text, message)
+    if result.startswith("Выгружено"):
+        _last_payload = text
+    return result
 
 
 def looks_secret(text: str) -> str | None:
