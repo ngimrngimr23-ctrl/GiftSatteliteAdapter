@@ -17,6 +17,7 @@ import menu
 from api_client import GiftApiClient, HISTORY_PAGE_SIZE
 from state import (AccountState, load_persisted, save_persisted, load_global_settings,
                    save_global_settings, storage_status, load_scan_baseline,
+                   load_watch_levels, save_watch_levels,
                    save_scan_baseline)
 from updater import run_cycle, fetch_sales_for
 import monochrome
@@ -1301,6 +1302,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
 
     baseline = await asyncio.to_thread(load_scan_baseline)
+    seed = await asyncio.to_thread(load_watch_levels)
     known = len((baseline or {}).get("collections") or {})
     if not known:
         context.bot_data["watch_running"] = False
@@ -1317,6 +1319,10 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             on_progress=say,
             on_pass=lambda stats: say(menu.watch_pass_text(stats)),
             should_stop=lambda: context.bot_data.get("watch_stop"),
+            # замеры флоров переживают деплой: иначе дозор после каждого
+            # перезапуска три круга молчит, набирая уровень заново
+            on_levels=save_watch_levels,
+            levels_seed=seed,
         )
 
     try:

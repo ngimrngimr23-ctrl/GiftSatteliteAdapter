@@ -18,6 +18,9 @@ GLOBAL_REDIS_KEY = os.environ.get("REDIS_GLOBAL_KEY", "giftadapter:global")
 SCAN_STATE_FILE = "scan_baseline.json"  # фолбэк для локальной разработки
 SCAN_REDIS_KEY = os.environ.get("REDIS_SCAN_KEY", "giftadapter:scan")
 
+LEVELS_STATE_FILE = "watch_levels.json"  # фолбэк для локальной разработки
+LEVELS_REDIS_KEY = os.environ.get("REDIS_LEVELS_KEY", "giftadapter:levels")
+
 
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
@@ -269,3 +272,20 @@ def save_scan_baseline(data: dict):
         _save_to_upstash_key(SCAN_REDIS_KEY, data)
         return
     _save_to_file_path(SCAN_STATE_FILE, data)
+
+
+def load_watch_levels() -> dict:
+    """
+    Замеры флоров дозора. Без них после каждого деплоя дозор три круга молчит:
+    уровень не с чем сравнивать, пока он не накопится заново.
+    """
+    if _UPSTASH_ENABLED:
+        return _load_from_upstash_key(LEVELS_REDIS_KEY)
+    return _load_from_file_path(LEVELS_STATE_FILE)
+
+
+def save_watch_levels(data: dict):
+    if _UPSTASH_ENABLED:
+        _save_to_upstash_key(LEVELS_REDIS_KEY, data)
+        return
+    _save_to_file_path(LEVELS_STATE_FILE, data)

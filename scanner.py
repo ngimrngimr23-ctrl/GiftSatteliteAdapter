@@ -496,6 +496,14 @@ class WatchParams:
     illiquid_per_month: float = 4.0
     illiquid_factor: float = 1.3
     pause_seconds: float = 0.0      # пауза между кругами
+    # Сколько последних замеров на дорожку сохранять между перезапусками.
+    # Ровно столько, сколько нужно, чтобы после деплоя уровень был готов сразу,
+    # а не через три круга. В памяти замеров держится больше — медиана по ним
+    # устойчивее, — но тащить всё в хранилище смысла нет.
+    keep_samples: int = 3
+    # Выгрузка тысяч дорожек — сотни килобайт. Каждый круг её писать незачем:
+    # круг занимает минуты, а деплои случаются раз в сутки.
+    save_every: int = 3
 
 
 def watch_collections(client, account, baseline, params: WatchParams) -> list:
@@ -588,9 +596,49 @@ def _sane_against_sales(offer: dict, known: dict, premiums: dict,
     return offer["price"] < expected, (1 - offer["price"] / expected) * 100
 
 
+def levels_to_store(levels: dict, keep: int) -> dict:
+    """
+    Замеры флоров в вид, который переживёт перезапуск.
+
+    Вложенный словарь, а не склеенный ключ: имя модели или коллекции может
+    содержать любой символ, и разделитель однажды попался бы внутри имени.
+
+    Время замера хранится одно на всю выгрузку, а не при каждой цене. Дорожек
+    тысячи, и отметка у каждой удваивала бы объём записи впустую: замеры идут
+    подряд, круг за кругом, и на фоне 12-часового окна разница между ними
+    роли не играет.
+    """
+    tracks = {}
+    for (collection, model, black), history in levels.items():
+        if not history:
+            continue
+        slot = tracks.setdefault(collection, {}).setdefault(model, {})
+        slot["b" if black else "n"] = [round(price, 2) for _, price in history[-keep:]]
+    return {"ts": int(time.time()), "tracks": tracks}
+
+
+def levels_from_store(data: dict) -> dict:
+    """Обратно в рабочий вид. Битые записи молча пропускаем — они не критичны."""
+    saved_at = float((data or {}).get("ts") or 0) or time.time()
+    out = {}
+    for collection, models in ((data or {}).get("tracks") or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for model, slots in models.items():
+            if not isinstance(slots, dict):
+                continue
+            for mark, prices in slots.items():
+                pairs = [(saved_at, float(p)) for p in (prices or [])
+                         if isinstance(p, (int, float)) and p > 0]
+                if pairs:
+                    out[(collection, model, mark == "b")] = pairs
+    return out
+
+
 def watch_market(client, account, params: WatchParams, baseline=None,
                  on_finds=None, on_progress=None, should_stop=None,
-                 on_pass=None, max_passes: int = 0) -> dict:
+                 on_pass=None, on_levels=None, levels_seed=None,
+                 max_passes: int = 0) -> dict:
     """
     Бесконечный круг по листингам. Находка — модель, чей флор ушёл ниже своего
     же уровня за последние часы.
@@ -603,7 +651,9 @@ def watch_market(client, account, params: WatchParams, baseline=None,
     if not names:
         return {"error": "не из чего строить обход", "passes": 0}
 
-    levels: dict = {}     # (коллекция, модель, чёрный) -> [(когда, флор)]
+    # замеры прошлой жизни процесса: с ними дозор ищет с первого круга, без них
+    # три круга молчит
+    levels: dict = levels_from_store(levels_seed) if levels_seed else {}
     reported: dict = {}   # лот -> когда показали
     passes = 0
     total_finds = 0
@@ -613,8 +663,11 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             f"Коллекций в обходе: {len(names)}, маркетов {len(params.markets)}.\n"
             f"Ищу просадку флора от {params.drop_pct:g}% против уровня за "
             f"последние {params.memory_hours:g} ч.\n"
-            f"Первые {params.min_samples} круга — прогрев: набираю уровни, "
-            f"находок не будет.\n"
+            + (f"Замеров из прошлого запуска: {len(levels)} — прогрев не нужен.\n"
+               if levels else
+               f"Первые {params.min_samples} круга — прогрев: набираю уровни, "
+               f"находок не будет.\n")
+            +
             f"Остановить: /watchstop")
 
     while not SHUTDOWN.is_set() and not (should_stop and should_stop()):
@@ -712,6 +765,11 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             "tracks": len(levels),
             "collections": len(names),
         }
+        if on_levels and passes % max(1, params.save_every) == 0:
+            try:
+                on_levels(levels_to_store(levels, params.keep_samples))
+            except Exception as e:
+                log.warning("не смог сохранить замеры флоров: %s", e)
         if on_pass:
             on_pass(stats)
         if max_passes and passes >= max_passes:
