@@ -1599,8 +1599,7 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
             levels = premium.backdrop_levels(known)
             if not levels:
                 return {"error": "нет уровней фонов — сначала обычный /premium"}
-            say(f"Пар модель+фон к проверке: {len(table)}. "
-                f"Уровни известны для {len(levels)} фонов.")
+            say(f"Уровни известны для {len(levels)} фонов.")
             return premium.targeted(
                 acc.client, acc, table, levels, pages=pages, on_progress=say,
                 should_stop=lambda: context.bot_data.get("premium_stop"))

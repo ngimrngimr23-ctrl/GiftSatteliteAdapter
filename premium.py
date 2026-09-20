@@ -328,6 +328,8 @@ def targeted(client, account, table: dict, levels: dict,
                          "уровень фона неизвестен": 0,
                          "не с чем сравнить по времени": 0}
     keys = sorted(table)
+    if on_progress:
+        on_progress(estimate_text(len(keys), pages, getattr(client, "min_interval", 0.55)))
     for index, key in enumerate(keys, 1):
         if SHUTDOWN.is_set() or (should_stop and should_stop()):
             break
@@ -341,7 +343,7 @@ def targeted(client, account, table: dict, levels: dict,
         if len(with_backdrop) < min_sales:
             skipped["мало продаж с фоном"] += 1
             continue
-        everything = _filtered(client, collection, account, [model], None, pages + 2)
+        everything = _filtered(client, collection, account, [model], None, pages + 1)
         others = [(parse_sold_at(s.get("soldAt")), s["normalizedPrice"]) for s in everything
                   if (s.get("backdropName") or "").strip().lower()
                   != backdrop.strip().lower()]
@@ -393,3 +395,23 @@ def targeted(client, account, table: dict, levels: dict,
     rows.sort(key=lambda r: -r["premium"])
     return {"ts": time.time(), "rows": rows, "premium_pct": answer,
             "checked": len(keys), "skipped": skipped}
+
+
+def estimate_text(pairs: int, pages: int, interval: float) -> str:
+    """
+    Сколько это займёт. Считается до старта, а не после.
+
+    Первый прогон я оценил в десять минут, а он шёл два часа: прикидка была на
+    сотню пар, а их оказалось 637, и на каждую уходит до пяти запросов.
+    """
+    # на пару: страницы по фону + страницы по модели; часть пар отсеивается
+    # после первого же запроса, поэтому в среднем меньше максимума
+    per_pair = pages + (pages + 1) * 0.65
+    requests = int(pairs * per_pair)
+    # пауза растёт от 429 и почти всегда упирается в потолок
+    minutes = requests * max(interval, 1.5) / 60
+    return (f"Пар к проверке: {pairs}.\n"
+            f"Запросов будет примерно {requests}, это около "
+            + (f"{minutes / 60:.1f} ч" if minutes >= 90 else f"{minutes:.0f} мин") + ".\n"
+            f"Меньше пар — быстрее: порог задаётся через /matchtable.\n"
+            "Остановить: /premiumstop")
