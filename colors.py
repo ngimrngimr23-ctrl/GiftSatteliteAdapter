@@ -47,8 +47,14 @@ DIRECT_PATTERNS = (
 _OG_IMAGE = re.compile(rb'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
                        re.I)
 
-PALETTE_SIZE = 4      # сколько цветов модели запоминаем
-MERGE_DELTA_E = 14.0  # ближе этого цвета считаем одним
+# Шесть, а не четыре. То, что отличает модель от соседних, бывает мелким:
+# у Eternal Rose стеклянный колпак занимает 35% и одинаков у всех моделей, а
+# сама роза — 2.5% и седьмое место. Отсев общего для коллекции делается потом,
+# по собранным данным, но для этого цвет должен сначала попасть в палитру.
+PALETTE_SIZE = 8      # сколько цветов модели запоминаем
+MERGE_DELTA_E = 14.0    # ближе этого цвета считаем одним
+BACKDROP_DELTA_E = 12.0 # ближе этого к любому цвету рамки — это фон
+RING_MIN_SHARE = 0.005  # цвет рамки реже этого — шум сглаживания
 
 SHUTDOWN = threading.Event()
 
@@ -94,14 +100,21 @@ def delta_e(rgb_a, rgb_b) -> float:
 # числам, имя приклеивается в самом конце.
 PALETTE = {
     "чёрный": (18, 18, 20), "тёмно-серый": (70, 70, 74), "серый": (128, 128, 130),
-    "светло-серый": (190, 190, 193), "белый": (245, 245, 245),
-    "красный": (200, 40, 40), "тёмно-красный": (120, 25, 30), "розовый": (235, 140, 170),
+    "светло-серый": (190, 190, 193), "белый": (247, 247, 247),
+    "красный": (200, 40, 40), "тёмно-красный": (120, 25, 30),
+    "розовый": (235, 130, 165), "малиновый": (205, 30, 110),
+    "бледно-розовый": (243, 213, 228), "персиковый": (250, 200, 170),
     "оранжевый": (235, 140, 45), "коричневый": (120, 80, 50), "бежевый": (215, 195, 165),
-    "жёлтый": (235, 210, 60), "золотой": (200, 165, 70), "оливковый": (130, 130, 60),
-    "зелёный": (70, 160, 80), "тёмно-зелёный": (35, 90, 55), "мятный": (150, 220, 190),
-    "бирюзовый": (60, 180, 180), "голубой": (120, 190, 235), "синий": (50, 90, 200),
-    "тёмно-синий": (30, 45, 100), "фиолетовый": (120, 70, 190),
-    "сиреневый": (185, 160, 225), "пурпурный": (170, 55, 140),
+    "кремовый": (245, 236, 214),
+    "жёлтый": (235, 210, 60), "светло-жёлтый": (246, 238, 160), "золотой": (200, 165, 70),
+    "оливковый": (130, 130, 60),
+    "зелёный": (70, 160, 80), "тёмно-зелёный": (35, 90, 55),
+    "салатовый": (160, 215, 150), "мятный": (150, 220, 190),
+    "бирюзовый": (60, 180, 180), "серо-бирюзовый": (125, 165, 165),
+    "голубой": (120, 190, 235), "бело-голубой": (218, 226, 246),
+    "синий": (50, 90, 200), "тёмно-синий": (30, 45, 100),
+    "фиолетовый": (120, 70, 190), "сиреневый": (185, 160, 225),
+    "пурпурный": (170, 55, 140),
 }
 
 
@@ -150,12 +163,61 @@ def fetch_image(slug: str, timeout: float = 15.0) -> tuple:
     return img.content, url, "через og:image"
 
 
-def extract_colors(data: bytes, size: int = 128) -> dict:
-    """
-    Цвет фона и цвет модели с одной картинки.
+def _buckets(pixels: list) -> dict:
+    """Пиксели по вёдрам 16 уровней на канал: ведро -> список пикселей."""
+    out = {}
+    for pixel in pixels:
+        out.setdefault(tuple(v // 16 for v in pixel), []).append(pixel)
+    return out
 
-    Порог отделения модели от фона — в Lab, а не в RGB: на тёмном фоне разница
-    в RGB маленькая даже там, где глаз видит явно другой цвет.
+
+def _median_rgb(group: list) -> tuple:
+    return tuple(sorted(c[i] for c in group)[len(group) // 2] for i in range(3))
+
+
+def _cluster(buckets: dict, total: int, merge: float = None, top: int = 0) -> list:
+    """
+    Вёдра -> палитра [{rgb, share}], от самого населённого цвета.
+
+    Склеиваем вёдра, неотличимые на глаз: на живой картинке чёрное тело Плюш
+    Пепе разъехалось по трём вёдрам из-за теней и сжатия JPEG, и «главным
+    цветом» оказывался кусок тела, а не тело.
+    """
+    if not total:
+        return []
+    merge = MERGE_DELTA_E if merge is None else merge
+    clusters = []
+    for _, group in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+        colour = _median_rgb(group)
+        lab = rgb_to_lab(colour)
+        for cluster in clusters:
+            if math.sqrt(sum((a - b) ** 2 for a, b in zip(lab, cluster["lab"]))) < merge:
+                cluster["n"] += len(group)
+                break
+        else:
+            clusters.append({"rgb": colour, "lab": lab, "n": len(group)})
+    clusters.sort(key=lambda c: -c["n"])
+    out = [{"rgb": c["rgb"], "share": c["n"] / total} for c in clusters]
+    return out[:top] if top else out
+
+
+def extract_colors(data: bytes, size: int = 160) -> dict:
+    """
+    Цвета фона и цвета модели с одной картинки.
+
+    Фон читается по всей рамке, а не по углам. Причина: почти у каждого фона
+    есть узор — значки той же гаммы, но светлее. Без него узор уезжает в
+    «цвета модели»: на мухоморе он занял там первое место с 20%, обогнав жёлтую
+    шляпку.
+
+    Цвета рамки берутся вёдрами, без склейки близких. Склейка их губит: между
+    фоном и узором лежат сглаженные пиксели всех промежуточных оттенков, и
+    узор пришивается к фону цепочкой, хотя сам от него на ΔE 20.
+
+    Отсеивать узор по оттенку было бы проще, но так выбросило бы целиком
+    модель, чей цвет совпадает с фоном, — а это ровно тот случай, ради которого
+    всё и затевается. Рамка же отличает их по месту: узор идёт по всему
+    квадрату, модель сидит только в центре.
     """
     try:
         from PIL import Image
@@ -167,65 +229,40 @@ def extract_colors(data: bytes, size: int = 128) -> dict:
         raise ColorError(f"картинка не разобралась: {e}")
     px = img.load()
 
-    # углы — фон. Берём медиану по каналам: так одиночный блик не сдвинет цвет.
-    corner = max(4, size // 10)
-    corners = []
-    for x0, y0 in ((0, 0), (size - corner, 0), (0, size - corner), (size - corner, size - corner)):
-        for x in range(x0, x0 + corner):
-            for y in range(y0, y0 + corner):
-                corners.append(px[x, y])
-    backdrop = tuple(sorted(c[i] for c in corners)[len(corners) // 2] for i in range(3))
+    frame = max(4, int(size * 0.12))
+    ring = [px[x, y] for x in range(size) for y in range(size)
+            if x < frame or y < frame or x >= size - frame or y >= size - frame]
+    ring_buckets = _buckets(ring)
+    refs = [rgb_to_lab(_median_rgb(group)) for group in ring_buckets.values()
+            if len(group) >= len(ring) * RING_MIN_SHARE]
+    if not refs:
+        raise ColorError("не удалось прочитать фон по рамке")
+    backdrop_palette = _cluster(ring_buckets, len(ring), top=3)
+    backdrop = backdrop_palette[0]["rgb"]
 
-    # центр — модель поверх фона
-    lo, hi = int(size * 0.20), int(size * 0.80)
-    model_px = [px[x, y] for x in range(lo, hi) for y in range(lo, hi)
-                if delta_e(px[x, y], backdrop) > 18]
+    # Решаем по ведру, а не по пикселю: пикселей в центре десятки тысяч, вёдер
+    # сотни, а результат тот же — внутри ведра цвет одинаковый.
+    lo, hi = int(size * 0.18), int(size * 0.82)
     total = (hi - lo) ** 2
-    if len(model_px) < total * 0.02:
+    model_buckets, kept = {}, 0
+    for key, group in _buckets([px[x, y] for x in range(lo, hi)
+                                for y in range(lo, hi)]).items():
+        lab = rgb_to_lab(_median_rgb(group))
+        if any(math.sqrt(sum((a - b) ** 2 for a, b in zip(lab, ref))) < BACKDROP_DELTA_E
+               for ref in refs):
+            continue
+        model_buckets[key] = group
+        kept += len(group)
+    if kept < total * 0.02:
         raise ColorError("модель не отделилась от фона — почти весь центр совпал с фоном")
 
-    # Палитра, а не один цвет. Модель почти всегда многоцветная: тело, белая
-    # обводка стикера, детали. Плюс в центр попадают значки узора фона — они
-    # другого оттенка, чем углы, и в один цвет не сворачиваются.
-    #
-    # Отделять узор от модели по оттенку я не стал: тогда модель, чей цвет
-    # совпадает с фоном, была бы выброшена целиком — а это ровно тот случай,
-    # ради которого всё и затевается. Вместо этого узор отсеивается сам, когда
-    # одну модель снимают с двух-трёх разных фонов: её цвета повторяются от
-    # снимка к снимку, цвета узора меняются вместе с фоном.
-    #
-    # Ведро — 16 уровней на канал, а не 32: тени и градиенты одного цвета
-    # иначе разъезжаются по соседним вёдрам и дробят долю.
-    buckets = {}
-    for pixel in model_px:
-        buckets.setdefault(tuple(v // 16 for v in pixel), []).append(pixel)
-
-    # Одних вёдер мало. На живой картинке чёрное тело Плюш Пепе разъехалось по
-    # трём вёдрам (8% + 8% + 5%) просто из-за теней и сжатия JPEG, и «главным»
-    # оказался кусок тела, а не тело. Поэтому вёдра, неотличимые на глаз,
-    # склеиваем: идём от самых населённых и подшиваем к ним всё, что ближе
-    # MERGE_DELTA_E. Граница в Lab, потому что только там одинаковая разница
-    # чисел означает одинаковую разницу на глаз.
-    clusters = []
-    for key, group in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
-        colour = tuple(sorted(c[i] for c in group)[len(group) // 2] for i in range(3))
-        lab = rgb_to_lab(colour)
-        for cluster in clusters:
-            if math.sqrt(sum((a - b) ** 2 for a, b in zip(lab, cluster["lab"]))) < MERGE_DELTA_E:
-                cluster["n"] += len(group)
-                break
-        else:
-            clusters.append({"rgb": colour, "lab": lab, "n": len(group)})
-
-    clusters.sort(key=lambda c: -c["n"])
-    palette = [{"rgb": c["rgb"], "share": c["n"] / len(model_px)}
-               for c in clusters[:PALETTE_SIZE]]
-
+    palette = _cluster(model_buckets, kept, top=PALETTE_SIZE)
     return {
         "backdrop_rgb": backdrop,
+        "backdrop_palette": backdrop_palette,
         "model_rgb": palette[0]["rgb"],
         "palette": palette,
-        "coverage": len(model_px) / total,
+        "coverage": kept / total,
         "dominance": palette[0]["share"],
     }
 
