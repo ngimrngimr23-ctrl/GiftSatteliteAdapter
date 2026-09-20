@@ -531,28 +531,37 @@ def _watch_offers(client, account, collection: str, params: WatchParams) -> list
     return offers
 
 
-def _floor_by_track(offers: list, params: WatchParams) -> dict:
+def _floor_by_track(offers: list) -> dict:
     """
     Самый дешёвый офер по каждой паре «модель + чёрный/не чёрный».
 
     Чёрные фоны ведём отдельной дорожкой: они дороже обычных в разы, и один
     чёрный лот среди обычных то поднимал бы уровень, то ронял — просадка
     мерещилась бы на ровном месте.
+
+    Ценовое окно здесь НЕ применяется, хотя соблазн есть. Модель, которая
+    обычно стоит 400 при потолке 350, иначе не набрала бы ни одного замера — и
+    её падение до 300 осталось бы незамеченным, а это самая ценная находка из
+    возможных. Окно проверяем позже, уже у самой просадки.
     """
     best = {}
     for offer in offers:
         price = offer["price"]
         if price <= 0:
             continue
-        if params.price_min and price < params.price_min:
-            continue
-        if params.price_max and price > params.price_max:
-            continue
         key = (offer["model"], is_black(offer["backdrop"]))
         cur = best.get(key)
         if cur is None or price < cur["price"]:
             best[key] = offer
     return best
+
+
+def _in_window(price: float, params: WatchParams) -> bool:
+    if params.price_min and price < params.price_min:
+        return False
+    if params.price_max and price > params.price_max:
+        return False
+    return True
 
 
 def _sane_against_sales(offer: dict, known: dict, premiums: dict,
@@ -627,7 +636,7 @@ def watch_market(client, account, params: WatchParams, baseline=None,
 
             now = time.time()
             finds = []
-            for (model, black), offer in _floor_by_track(offers, params).items():
+            for (model, black), offer in _floor_by_track(offers).items():
                 key = (collection, model, black)
                 history = [(ts, price) for ts, price in levels.get(key, ())
                            if now - ts <= params.memory_hours * 3600]
@@ -644,7 +653,7 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                     illiquid = per_month is not None and per_month < params.illiquid_per_month
                     if illiquid:
                         required *= params.illiquid_factor
-                    if drop + 1e-9 >= required:
+                    if drop + 1e-9 >= required and _in_window(offer["price"], params):
                         ok, vs_ref = _sane_against_sales(offer, known, premiums, ref_fresh)
                         if not ok:
                             skipped_norm += 1
