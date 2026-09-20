@@ -274,3 +274,182 @@ def probe(slug: str) -> dict:
     out.update({"slug": slug, "url": url, "how": how, "bytes": len(data),
                 "image": data})
     return out
+
+
+# --- полный сбор ------------------------------------------------------------
+
+MIN_INTERVAL = 0.5      # пауза между скачиваниями с телеграма
+SAMPLES_PER_MODEL = 2   # сколько экземпляров модели снимаем
+SEEN_MIN = 2            # цвет засчитываем, если он повторился в стольких снимках
+BACKDROP_SAMPLES = 50   # сколько замеров цвета фона держим на память
+
+
+def merge_palettes(samples: list) -> list:
+    """
+    Палитры нескольких экземпляров одной модели -> её цвета.
+
+    Снимки берутся с разных фонов не ради статистики, а ради отсева. В центр
+    картинки попадает не только модель: значки узора, полупрозрачные части,
+    через которые просвечивает фон. Всё это меняется вместе с фоном, а цвета
+    самой модели повторяются от снимка к снимку — значит цвет, встретившийся
+    один раз из трёх, к модели скорее всего не относится.
+
+    При единственном снимке отсеивать нечем, и тогда отдаём как есть, пометив
+    seen=1 — по этой пометке потом видно, каким записям верить меньше.
+    """
+    if not samples:
+        return []
+    groups = []
+    for palette in samples:
+        for entry in palette:
+            lab = rgb_to_lab(entry["rgb"])
+            for group in groups:
+                if math.sqrt(sum((a - b) ** 2 for a, b in zip(lab, group["lab"]))) < MERGE_DELTA_E:
+                    group["shares"].append(entry["share"])
+                    group["seen"] += 1
+                    break
+            else:
+                groups.append({"rgb": entry["rgb"], "lab": lab,
+                               "shares": [entry["share"]], "seen": 1})
+    need = SEEN_MIN if len(samples) >= SEEN_MIN else 1
+    kept = [g for g in groups if g["seen"] >= need]
+    kept.sort(key=lambda g: -sum(g["shares"]) / len(samples))
+    return [{"rgb": list(g["rgb"]),
+             "share": round(sum(g["shares"]) / len(samples), 4),
+             "seen": g["seen"]}
+            for g in kept[:PALETTE_SIZE]]
+
+
+def pick_samples(offers: list, per_model: int) -> dict:
+    """
+    Из листингов — по нескольку экземпляров на модель, с разными фонами.
+
+    Разные фоны здесь не прихоть: именно на них держится отсев узора и
+    просвечивающих частей. Если у модели все лоты на одном фоне, берём что
+    есть — но снимков будет меньше, и это отразится в пометке seen.
+    """
+    by_model = {}
+    for offer in offers:
+        model = (offer.get("model") or "").strip()
+        slug = (offer.get("slug") or "").strip()
+        if not model or not slug:
+            continue
+        by_model.setdefault(model, []).append(offer)
+    out = {}
+    for model, items in by_model.items():
+        chosen, used = [], set()
+        for item in items:
+            backdrop = (item.get("backdrop") or "").strip().lower()
+            if backdrop in used:
+                continue
+            used.add(backdrop)
+            chosen.append(item)
+            if len(chosen) >= per_model:
+                break
+        for item in items:                      # добираем, если фонов не хватило
+            if len(chosen) >= per_model:
+                break
+            if item not in chosen:
+                chosen.append(item)
+        out[model] = chosen
+    return out
+
+
+def collect(offers_for, collections: list, per_model: int = SAMPLES_PER_MODEL,
+            known: dict | None = None, on_progress=None, on_save=None,
+            should_stop=None, save_every: int = 5) -> dict:
+    """
+    Цвета моделей и фонов по всему рынку.
+
+    offers_for(коллекция) -> листинги в виде сканера; берётся снаружи, чтобы
+    сбор пользовался тем же клиентом и той же очередью запросов.
+
+    Картинки качаются с телеграма, к gift-satellite идут только запросы за
+    листингами — по три на коллекцию.
+    """
+    models = dict((known or {}).get("models") or {})
+    backdrops = dict((known or {}).get("backdrops") or {})
+    stats = {"models": 0, "images": 0, "errors": 0, "skipped": 0}
+    last = 0.0
+
+    for index, collection in enumerate(collections, 1):
+        if SHUTDOWN.is_set() or (should_stop and should_stop()):
+            break
+        done = models.setdefault(collection, {})
+        try:
+            offers = offers_for(collection)
+        except Exception as e:
+            log.warning("листинги %s: %s", collection, e)
+            stats["errors"] += 1
+            continue
+
+        for model, items in pick_samples(offers, per_model).items():
+            if SHUTDOWN.is_set() or (should_stop and should_stop()):
+                break
+            if done.get(model, {}).get("palette"):
+                stats["skipped"] += 1
+                continue
+            palettes = []
+            for item in items:
+                wait = MIN_INTERVAL - (time.monotonic() - last)
+                if wait > 0:
+                    time.sleep(wait)
+                last = time.monotonic()
+                try:
+                    data, _, _ = fetch_image(item["slug"])
+                    got = extract_colors(data)
+                except ColorError as e:
+                    log.debug("%s/%s %s: %s", collection, model, item["slug"], e)
+                    stats["errors"] += 1
+                    continue
+                stats["images"] += 1
+                palettes.append(got["palette"])
+                backdrop = (item.get("backdrop") or "").strip()
+                if backdrop:
+                    seen = backdrops.setdefault(backdrop, {})
+                    samples = seen.setdefault("samples", [])
+                    samples.append(list(got["backdrop_rgb"]))
+                    del samples[:-BACKDROP_SAMPLES]
+            palette = merge_palettes(palettes)
+            if palette:
+                done[model] = {"palette": palette, "samples": len(palettes)}
+                stats["models"] += 1
+
+        if on_progress and index % 5 == 0:
+            on_progress(f"Цвета: {index} из {len(collections)} коллекций, "
+                        f"моделей {stats['models']}, картинок {stats['images']}, "
+                        f"пропущено готовых {stats['skipped']}, ошибок {stats['errors']}")
+        if on_save and index % save_every == 0:
+            try:
+                on_save(_pack(models, backdrops))
+            except Exception as e:
+                log.warning("не смог сохранить цвета на %d-й коллекции: %s", index, e)
+
+    packed = _pack(models, backdrops)
+    if on_save:
+        try:
+            on_save(packed)
+        except Exception as e:
+            log.warning("не смог сохранить цвета в конце: %s", e)
+    packed["stats"] = stats
+    return packed
+
+
+def _pack(models: dict, backdrops: dict) -> dict:
+    """
+    Собранное в вид для хранения. Цвет фона — медиана по каналам, а не среднее:
+    один экземпляр с крупной моделью, залезшей в рамку, среднее бы утащил.
+
+    Замеры хранятся вместе с итогом, чтобы прерванный сбор можно было
+    продолжить: иначе после перезапуска медиана считалась бы с нуля.
+    """
+    out = {}
+    for name, seen in backdrops.items():
+        samples = (seen or {}).get("samples") or []
+        if not samples:
+            continue
+        out[name] = {"rgb": [sorted(s[i] for s in samples)[len(samples) // 2]
+                             for i in range(3)],
+                     "n": len(samples),
+                     "samples": samples[-BACKDROP_SAMPLES:]}
+    return {"ts": time.time(), "models": models, "backdrops": out}

@@ -969,3 +969,54 @@ def watch_pass_text(stats: dict) -> str:
     if stats.get("skipped_norm"):
         out += f", отсеяно как возврат к норме {stats['skipped_norm']}"
     return out
+
+
+def colors_text(base: dict) -> str:
+    """Что накопила база цветов."""
+    models = (base or {}).get("models") or {}
+    backdrops = (base or {}).get("backdrops") or {}
+    total = sum(len(v) for v in models.values() if isinstance(v, dict))
+    if not total and not backdrops:
+        return "База цветов пуста. Собрать: /colors"
+    thin = sum(1 for coll in models.values() if isinstance(coll, dict)
+               for info in coll.values() if (info or {}).get("samples", 0) < 2)
+    lines = [f"🎨 База цветов",
+             f"Коллекций: {len(models)}, моделей: {total}",
+             f"Фонов: {len(backdrops)}"]
+    if thin:
+        lines.append(f"⚠️ по одному снимку (узор мог не отсеяться): {thin}")
+    if backdrops:
+        lines.append("\nФоны, самые частые:")
+        top = sorted(backdrops.items(), key=lambda kv: -(kv[1] or {}).get("n", 0))[:12]
+        for name, info in top:
+            rgb = tuple((info or {}).get("rgb") or (0, 0, 0))
+            lines.append(f"• {name} — {color_name_of(rgb)} {rgb}, замеров {info.get('n', 0)}")
+    return "\n".join(lines)
+
+
+def color_name_of(rgb) -> str:
+    """Имя цвета для отчётов. Вынесено сюда, чтобы menu не тянул colors целиком."""
+    import colors
+    return colors.color_name(tuple(rgb))
+
+
+def colors_csv(base: dict) -> str:
+    """Вся база цветов файлом: по строке на цвет модели и по строке на фон."""
+    rows = ["тип;коллекция;имя;цвет №;доля %;снимков;R;G;B;имя цвета"]
+    for name, info in sorted(((base or {}).get("backdrops") or {}).items()):
+        rgb = list((info or {}).get("rgb") or [0, 0, 0])
+        rows.append(";".join(["фон", "", str(name).replace(";", ","), "1", "",
+                              str((info or {}).get("n", 0)), *map(str, rgb),
+                              color_name_of(rgb)]))
+    for collection, models in sorted(((base or {}).get("models") or {}).items()):
+        if not isinstance(models, dict):
+            continue
+        for model, info in sorted(models.items()):
+            for index, entry in enumerate((info or {}).get("palette") or [], 1):
+                rgb = list(entry.get("rgb") or [0, 0, 0])
+                share = f"{entry.get('share', 0) * 100:.1f}".replace(".", ",")
+                rows.append(";".join([
+                    "модель", str(collection).replace(";", ","),
+                    str(model).replace(";", ","), str(index), share,
+                    str(entry.get("seen", "")), *map(str, rgb), color_name_of(rgb)]))
+    return "\n".join(rows)

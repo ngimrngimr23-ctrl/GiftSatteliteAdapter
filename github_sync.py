@@ -99,7 +99,7 @@ def _ensure_branch():
     log.info("создал ветку %s для выгрузки базы", BRANCH)
 
 
-def publish(text: str, message: str) -> str:
+def publish(text: str, message: str, path: str | None = None) -> str:
     """
     Положить текст файлом в репозиторий. Возвращает описание результата —
     оно уходит в чат, поэтому без токенов и ссылок с ними.
@@ -112,12 +112,13 @@ def publish(text: str, message: str) -> str:
         log.error("в выгрузке найден признак секрета (%s) — не отправляю", hint)
         return f"Не отправил: в данных нашлось похожее на секрет ({hint})."
 
+    path = path or PATH
     try:
         _ensure_branch()
         sha = None
         try:
             existing = _request(
-                "GET", f"{API}/repos/{REPO}/contents/{PATH}?ref={BRANCH}")
+                "GET", f"{API}/repos/{REPO}/contents/{path}?ref={BRANCH}")
             sha = existing.get("sha")
         except urllib.error.HTTPError as e:
             if e.code != 404:
@@ -129,7 +130,7 @@ def publish(text: str, message: str) -> str:
         }
         if sha:
             payload["sha"] = sha
-        _request("PUT", f"{API}/repos/{REPO}/contents/{PATH}", payload)
+        _request("PUT", f"{API}/repos/{REPO}/contents/{path}", payload)
     except urllib.error.HTTPError as e:
         detail = e.read().decode()[:200]
         log.warning("не смог выгрузить базу в GitHub: HTTP %s %s", e.code, detail)
@@ -138,4 +139,4 @@ def publish(text: str, message: str) -> str:
         log.warning("не смог выгрузить базу в GitHub: %s", e)
         return f"Не получилось выгрузить: {e}"
 
-    return f"Выгружено в {REPO}, ветка {BRANCH}, файл {PATH}"
+    return f"Выгружено в {REPO}, ветка {BRANCH}, файл {path}"

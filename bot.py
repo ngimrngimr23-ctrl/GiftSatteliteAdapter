@@ -18,6 +18,7 @@ from api_client import GiftApiClient, HISTORY_PAGE_SIZE
 from state import (AccountState, load_persisted, save_persisted, load_global_settings,
                    save_global_settings, storage_status, load_scan_baseline,
                    load_watch_levels, save_watch_levels,
+                   load_colors, save_colors,
                    save_scan_baseline)
 from updater import run_cycle, fetch_sales_for
 import monochrome
@@ -142,6 +143,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch [просадка%] [мин_цена] [макс_цена] [all] — дозор: гоняет по кругу одни листинги и ловит модели, чей флор только что ушёл вниз против своего же уровня. Круг — минуты, историю продаж не качает\n"
         "/watchstop — остановить дозор\n"
         "/colorsprobe <slug> — проверка на одной вещи: скачать её картинку и вынуть цвет фона и цвет модели\n"
+        "/colors [снимков] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма\n"
+        "/colorsstop — остановить сбор\n"
+        "/colorsbase — что накопила база цветов, файлом\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1342,6 +1346,136 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"просадок найдено {result['finds']}.")
 
 
+async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /colors [<acc>] [снимков] — собрать цвета моделей и фонов по всему рынку.
+
+    К gift-satellite идут только запросы за листингами — по три на коллекцию.
+    Сами картинки качаются с телеграма и лимита API не касаются.
+
+    Собранное сохраняется по ходу: проход идёт час, и обрыв не должен его
+    обнулять. Повторный запуск не перекачивает то, что уже разобрано.
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+    if context.bot_data.get("colors_running"):
+        await update.message.reply_text("Сбор цветов уже идёт. Остановить: /colorsstop")
+        return
+
+    args = list(context.args)
+    if args and args[0] in accounts:
+        acc, args = accounts[args[0]], args[1:]
+    else:
+        acc = next((a for a in accounts.values() if not a.paused), None) or \
+            next(iter(accounts.values()))
+    try:
+        per_model = max(1, min(4, int(args[0])))
+    except (IndexError, ValueError):
+        per_model = colors.SAMPLES_PER_MODEL
+
+    known = await asyncio.to_thread(load_colors)
+    baseline = await asyncio.to_thread(load_scan_baseline)
+    names = sorted((baseline or {}).get("collections") or {})
+    if not names:
+        try:
+            names = sorted(c["name"] for c in (await asyncio.to_thread(acc.client.get_collections))
+                           if isinstance(c, dict) and c.get("name"))
+        except Exception as e:
+            await update.message.reply_text(f"Не удалось получить список коллекций: {e}")
+            return
+
+    chat_id = update.effective_chat.id
+    loop = asyncio.get_running_loop()
+    context.bot_data["colors_running"] = True
+    context.bot_data["colors_stop"] = False
+
+    def say(text: str):
+        asyncio.run_coroutine_threadsafe(
+            context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
+
+    await update.message.reply_text(
+        f"🎨 Собираю цвета.\n"
+        f"Коллекций: {len(names)}, снимков на модель: {per_model}.\n"
+        f"Запросов к API — по три на коллекцию, картинки идут с телеграма.\n"
+        f"Разные фоны на снимках нужны, чтобы отсеять узор: цвета модели "
+        f"повторяются, цвета узора меняются вместе с фоном.\n"
+        "Остановить: /colorsstop")
+
+    def offers_for(collection):
+        out = []
+        for market in scanner.WATCH_MARKETS:
+            try:
+                out += scanner._offers_from_listings(
+                    acc.client.search_market(market, collection), market)
+            except Exception as e:
+                acc.record_error(f"colors search {market}/{collection}: {e}")
+        return out
+
+    def work():
+        return colors.collect(
+            offers_for, names, per_model=per_model, known=known,
+            on_progress=say, on_save=save_colors,
+            should_stop=lambda: context.bot_data.get("colors_stop"))
+
+    try:
+        result = await asyncio.to_thread(work)
+    except Exception as e:
+        log.exception("сбор цветов упал")
+        await update.message.reply_text(f"Сбор оборвался: {e}")
+        return
+    finally:
+        context.bot_data["colors_running"] = False
+
+    stats = result.get("stats") or {}
+    await update.message.reply_text(
+        f"🎨 Готово.\n"
+        f"Новых моделей: {stats.get('models', 0)}, картинок скачано: "
+        f"{stats.get('images', 0)}\n"
+        f"Пропущено готовых: {stats.get('skipped', 0)}, ошибок: {stats.get('errors', 0)}\n\n"
+        + menu.colors_text(result))
+    await _send_colors_file(update, result)
+
+
+async def cmd_colorsstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/colorsstop — остановить сбор цветов."""
+    if not authorized(update):
+        return
+    if not context.bot_data.get("colors_running"):
+        await update.message.reply_text("Сбор цветов сейчас не идёт.")
+        return
+    context.bot_data["colors_stop"] = True
+    await update.message.reply_text("Остановлю. Собранное сохранится.")
+
+
+async def cmd_colorsbase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/colorsbase — что накопила база цветов, файлом."""
+    if not authorized(update):
+        return
+    base = await asyncio.to_thread(load_colors)
+    await update.message.reply_text(menu.colors_text(base))
+    await _send_colors_file(update, base)
+
+
+async def _send_colors_file(update: Update, base: dict):
+    """Базу цветов файлом и, если настроено, в GitHub — чтобы её видно было со стороны."""
+    if not (base or {}).get("models"):
+        return
+    text = menu.colors_csv(base)
+    data = BytesIO(("\ufeff" + text).encode("utf-8"))
+    data.name = f"colors_{datetime.now():%Y-%m-%d_%H%M}.csv"
+    await update.message.reply_document(document=data, filename=data.name)
+    if github_sync.enabled():
+        note = await asyncio.to_thread(
+            github_sync.publish, text,
+            f"цвета: {sum(len(v) for v in base['models'].values() if isinstance(v, dict))} моделей",
+            "scan/colors.csv")
+        await update.message.reply_text(note)
+
+
 async def cmd_colorsprobe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /colorsprobe <slug> — проверка на одной вещи: качается ли картинка и
@@ -1628,6 +1762,9 @@ BOT_COMMANDS = [
     ("watch", "Дозор: свежие просадки флора"),
     ("watchstop", "Остановить дозор"),
     ("colorsprobe", "Проверить разбор цветов на одной вещи"),
+    ("colors", "Собрать цвета моделей и фонов"),
+    ("colorsstop", "Остановить сбор цветов"),
+    ("colorsbase", "Что накопила база цветов"),
     ("scanbase", "Что накопила база скана"),
     ("scanpublish", "Выложить базу скана в GitHub"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -1692,6 +1829,9 @@ def main():
     app.add_handler(CommandHandler("watch", cmd_watch, block=False))
     app.add_handler(CommandHandler("watchstop", cmd_watchstop, block=False))
     app.add_handler(CommandHandler("colorsprobe", cmd_colorsprobe, block=False))
+    app.add_handler(CommandHandler("colors", cmd_colors, block=False))
+    app.add_handler(CommandHandler("colorsstop", cmd_colorsstop, block=False))
+    app.add_handler(CommandHandler("colorsbase", cmd_colorsbase, block=False))
     app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
     app.add_handler(CommandHandler("scanpublish", cmd_scanpublish, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
