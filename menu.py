@@ -1031,3 +1031,60 @@ def colors_csv(base: dict) -> str:
                     str(model).replace(";", ","), str(index), share,
                     str(entry.get("seen", "")), *map(str, rgb), color_name_of(rgb)]))
     return "\n".join(rows)
+
+
+def match_finds_text(collection: str, finds: list, limit: int = 8) -> str:
+    """Лоты, где фон подходит модели, а цена как у обычной."""
+    lines = [f"🎯 {collection} — {len(finds)}"]
+    for f in finds[:limit]:
+        premium = f["premium"]
+        mark = "ровно как обычный" if abs(premium) < 1 else (
+            f"дешевле обычного на {-premium:.0f}%" if premium < 0
+            else f"дороже обычного всего на {premium:.0f}%")
+        thin = " ⚠️цвет по одному снимку" if f.get("samples", 0) < 2 else ""
+        lines.append(
+            f"• {f['model']} · {f['backdrop']} — {f['price']:.2f}\n"
+            f"   фон подходит модели, ΔE {f['delta']:.0f}{thin}\n"
+            f"   обычный лот {f['ordinary']:.2f} ({f['source']}) — {mark}\n"
+            f"   {f['market']}"
+            + (f"\n   {offer_link(f)}" if offer_link(f) else ""))
+    if len(finds) > limit:
+        lines.append(f"…и ещё {len(finds) - limit}, все будут в файле")
+    return "\n".join(lines)
+
+
+def match_report_csv(finds: list) -> str:
+    rows = ["коллекция;модель;фон;ΔE;цена;обычный лот;наценка %;чем меряли;"
+            "редкость %;маркет;снимков цвета;ссылка"]
+
+    def num(value, digits=2):
+        return "" if value is None else f"{value:.{digits}f}".replace(".", ",")
+
+    for f in sorted(finds, key=lambda f: f["premium"]):
+        rarity = f.get("rarity")
+        rows.append(";".join([
+            str(f.get("collection", "")).replace(";", ","),
+            str(f.get("model", "")).replace(";", ","),
+            str(f.get("backdrop", "")).replace(";", ","),
+            num(f.get("delta"), 1), num(f.get("price")), num(f.get("ordinary")),
+            num(f.get("premium"), 1), str(f.get("source", "")),
+            num(rarity / 10, 1) if rarity is not None else "",
+            str(f.get("market", "")), str(f.get("samples", "")),
+            str(f.get("link", "")).replace(";", ","),
+        ]))
+    return "\n".join(rows)
+
+
+def match_table_csv(table: dict) -> str:
+    """Сама подборка: какой фон какой модели подходит и насколько."""
+    rows = ["коллекция;модель;R;G;B;имя цвета;снимков;место;фон;ΔE"]
+    for (collection, model), info in sorted(table.items()):
+        rgb = list(info["rgb"])
+        for place, (backdrop, delta) in enumerate(info["backdrops"], 1):
+            rows.append(";".join([
+                str(collection).replace(";", ","), str(model).replace(";", ","),
+                *map(str, rgb), color_name_of(rgb), str(info.get("samples", "")),
+                str(place), str(backdrop).replace(";", ","),
+                f"{delta:.1f}".replace(".", ","),
+            ]))
+    return "\n".join(rows)

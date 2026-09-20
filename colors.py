@@ -580,3 +580,83 @@ def collect_backdrops(offers_for, collections: list, target: int = BACKDROP_TARG
             log.warning("не смог сохранить фоны в конце: %s", e)
     packed["stats"] = stats
     return packed
+
+
+# --- подбор фона под модель -------------------------------------------------
+
+MIN_CHROMA = 15.0       # ниже этого цвет считается бесцветным: серый, белый, чёрный
+MATCH_MAX_DELTA = 25.0  # дальше этого фон модели уже не подходит
+MATCH_TOP = 3           # сколько фонов оставляем на модель
+
+
+def chroma(rgb) -> float:
+    """Насколько цвет выражен. У серого, белого и чёрного — около нуля."""
+    _, a, b = rgb_to_lab(rgb)
+    return math.sqrt(a * a + b * b)
+
+
+def key_color(palette: list) -> dict | None:
+    """
+    Цвет, которым модель опознаётся.
+
+    Не просто самый крупный: у стикеров почти всегда есть белая обводка, и на
+    четверти моделей она крупнее самого рисунка. Берём самый заметный из
+    выраженных цветов, а если выраженных нет вовсе — модель и правда серая или
+    чёрная, и тогда годится самый крупный.
+    """
+    if not palette:
+        return None
+    vivid = [p for p in palette if chroma(p["rgb"]) > MIN_CHROMA]
+    return max(vivid or palette, key=lambda p: p.get("share", 0))
+
+
+def backdrop_colors(base: dict) -> dict:
+    """
+    Имя фона -> его цвет там, где рядом лежит модель.
+
+    Цвет по краю не годится: фон нарисован радиальным градиентом, край темнее
+    середины, а модель лежит в середине.
+    """
+    out = {}
+    for name, info in ((base or {}).get("backdrops") or {}).items():
+        rgb = (info or {}).get("center_rgb") or (info or {}).get("rgb")
+        if rgb:
+            out[name] = tuple(rgb)
+    return out
+
+
+def best_backdrops(model_rgb, backdrops: dict, top: int = MATCH_TOP,
+                   max_delta: float = MATCH_MAX_DELTA) -> list:
+    """Ближайшие к модели фоны: [(имя, ΔE)], от самого близкого."""
+    near = sorted(((name, delta_e(model_rgb, rgb)) for name, rgb in backdrops.items()),
+                  key=lambda pair: pair[1])
+    return [pair for pair in near[:top] if pair[1] <= max_delta]
+
+
+def matching_table(base: dict, top: int = MATCH_TOP,
+                   max_delta: float = MATCH_MAX_DELTA) -> dict:
+    """
+    (коллекция, модель) -> [(фон, ΔE)] — фоны, подходящие модели по цвету.
+
+    Модели, у которых нет ни одного фона ближе max_delta, в таблицу не
+    попадают: подбирать им нечего.
+    """
+    backdrops = backdrop_colors(base)
+    if not backdrops:
+        return {}
+    out = {}
+    for collection, models in ((base or {}).get("models") or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for model, info in models.items():
+            colour = key_color((info or {}).get("palette") or [])
+            if not colour:
+                continue
+            near = best_backdrops(tuple(colour["rgb"]), backdrops, top, max_delta)
+            if near:
+                out[(collection, model)] = {
+                    "rgb": tuple(colour["rgb"]),
+                    "samples": (info or {}).get("samples", 0),
+                    "backdrops": near,
+                }
+    return out

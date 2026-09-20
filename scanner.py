@@ -778,3 +778,130 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             SHUTDOWN.wait(params.pause_seconds)
 
     return {"passes": passes, "finds": total_finds, "collections": len(names)}
+
+
+# --- подходящий фон без наценки ---------------------------------------------
+#
+# Обычно фон, подходящий модели по цвету, стоит дороже обычного — за сочетание
+# платят. Но лот выставляет человек, и цену он ставит по модели, а на фон часто
+# не смотрит. Тогда вещь с нужным фоном стоит ровно столько же, сколько такая же
+# с любым другим, — и это та самая покупка, которую стоит заметить.
+
+
+@dataclass
+class MatchParams:
+    """Настройки поиска лотов с подходящим фоном без наценки."""
+    tolerance_pct: float = 10.0   # насколько дороже обычного ещё считается «без наценки»
+    price_min: float = 0.0
+    price_max: float = 0.0
+    markets: tuple = WATCH_MARKETS
+    top_backdrops: int = 3
+    max_delta: float = 25.0
+    # До какого возраста верить цене по сделкам. Она тут запасной вариант: если
+    # у модели нет ни одного лота на обычном фоне, сравнивать больше не с чем.
+    ref_max_age_h: float = 72.0
+
+
+def scan_matches(client, account, params: MatchParams, colors_base: dict,
+                 baseline=None, on_finds=None, on_progress=None,
+                 should_stop=None) -> dict:
+    """
+    Один проход по листингам: где модель продаётся с подходящим ей фоном по
+    цене обычной.
+
+    Сравниваем в первую очередь с другими лотами той же модели прямо сейчас —
+    это одна и та же минута, один и тот же рынок, и разница между ними значит
+    ровно надбавку за фон. Цена по сделкам идёт в дело, только когда других
+    лотов нет вовсе.
+    """
+    import colors as colours
+
+    table = colours.matching_table(colors_base, params.top_backdrops, params.max_delta)
+    if not table:
+        return {"error": "база цветов пуста или в ней нет фонов", "finds": []}
+    names = sorted({collection for collection, _ in table})
+    stored = (baseline or {}).get("collections") or {}
+
+    if on_progress:
+        on_progress(f"🎯 Ищу подходящий фон без наценки.\n"
+                    f"Моделей с подобранным фоном: {len(table)}, "
+                    f"коллекций: {len(names)}.\n"
+                    f"Порог «без наценки»: не дороже обычного лота на "
+                    f"{params.tolerance_pct:g}%.")
+
+    found, checked, no_base = [], 0, 0
+    for index, collection in enumerate(names, 1):
+        if SHUTDOWN.is_set() or (should_stop and should_stop()):
+            break
+        offers = []
+        for market in params.markets:
+            try:
+                offers += _offers_from_listings(
+                    client.search_market(market, collection), market)
+            except ApiError as e:
+                account.record_error(f"match search {market}/{collection}: {e}")
+        if not offers:
+            continue
+
+        snapshot = stored.get(collection) or {}
+        known_models = snapshot.get("models") or {}
+        ref_fresh = time.time() - snapshot.get("ts", 0) <= params.ref_max_age_h * 3600
+
+        by_model = {}
+        for offer in offers:
+            by_model.setdefault(offer["model"], []).append(offer)
+
+        hits = []
+        for model, lots in by_model.items():
+            info = table.get((collection, model))
+            if not info:
+                continue
+            checked += 1
+            suits = {name.strip().lower(): delta for name, delta in info["backdrops"]}
+            fitting = [l for l in lots if l["backdrop"].strip().lower() in suits]
+            if not fitting:
+                continue
+            plain = [l["price"] for l in lots
+                     if l["backdrop"].strip().lower() not in suits and l["price"] > 0]
+            if plain:
+                ordinary, source = min(plain), "по лотам той же модели"
+            else:
+                ref = (known_models.get(model) or {}).get("ref") if ref_fresh else None
+                if not ref:
+                    no_base += 1
+                    continue
+                ordinary, source = ref, "по сделкам модели"
+
+            for lot in fitting:
+                price = lot["price"]
+                if price <= 0 or price > ordinary * (1 + params.tolerance_pct / 100):
+                    continue
+                if params.price_min and price < params.price_min:
+                    continue
+                if params.price_max and price > params.price_max:
+                    continue
+                hit = dict(lot)
+                hit.update({
+                    "collection": collection,
+                    "delta": suits[lot["backdrop"].strip().lower()],
+                    "ordinary": ordinary,
+                    "source": source,
+                    "premium": (price / ordinary - 1) * 100,
+                    "model_rgb": info["rgb"],
+                    "samples": info["samples"],
+                    "rarity": (known_models.get(model) or {}).get("rarity"),
+                })
+                hits.append(hit)
+
+        if hits:
+            hits.sort(key=lambda h: h["premium"])
+            found += hits
+            if on_finds:
+                on_finds(collection, hits)
+        if on_progress and index % 20 == 0:
+            on_progress(f"Пройдено {index} из {len(names)}: "
+                        f"моделей с подобранным фоном проверено {checked}, "
+                        f"найдено {len(found)}")
+
+    return {"finds": sorted(found, key=lambda h: h["premium"]),
+            "collections": len(names), "checked": checked, "no_base": no_base}

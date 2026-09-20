@@ -146,6 +146,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/colors [снимков] [thin] [back] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма. thin — добрать модели, снятые с одного фона; back — пересобрать только фоны\n"
         "/colorsstop — остановить сбор\n"
         "/colorsbase — что накопила база цветов, файлом\n"
+        "/match [допуск%] [мин_цена] [макс_цена] — лоты, где фон подходит модели по цвету, а цена как у обычной: за сочетание не доплатили\n"
+        "/matchstop — остановить поиск\n"
+        "/matchtable — сама подборка: какой фон какой модели подходит. Запросов не делает\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1499,6 +1502,123 @@ async def _send_colors_file(update: Update, base: dict):
         await update.message.reply_text(note)
 
 
+async def cmd_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /match [<acc>] [допуск%] [мин_цена] [макс_цена] — лоты, где фон подходит
+    модели по цвету, а цена как у обычной.
+
+    За сочетание обычно платят. Но цену ставит человек, и ставит он её по
+    модели, на фон часто не глядя — тогда вещь с подходящим фоном стоит
+    столько же, сколько такая же с любым другим.
+    """
+    if not authorized(update):
+        return
+    accounts = context.bot_data["accounts"]
+    if not accounts:
+        await update.message.reply_text("Нет ни одного аккаунта")
+        return
+    if context.bot_data.get("match_running"):
+        await update.message.reply_text("Поиск уже идёт. Остановить: /matchstop")
+        return
+
+    args = list(context.args)
+    if args and args[0] in accounts:
+        acc, args = accounts[args[0]], args[1:]
+    else:
+        acc = next((a for a in accounts.values() if not a.paused), None) or \
+            next(iter(accounts.values()))
+
+    def number(index, default):
+        try:
+            return float(args[index].replace(",", "."))
+        except (IndexError, ValueError):
+            return default
+
+    params = scanner.MatchParams(
+        tolerance_pct=number(0, 10.0),
+        price_min=number(1, 0.0),
+        price_max=number(2, 0.0),
+    )
+    base = await asyncio.to_thread(load_colors)
+    if not (base or {}).get("backdrops"):
+        await update.message.reply_text(
+            "База цветов пуста — подбирать фоны не по чему. Сначала /colors")
+        return
+    baseline = await asyncio.to_thread(load_scan_baseline)
+
+    chat_id = update.effective_chat.id
+    loop = asyncio.get_running_loop()
+    context.bot_data["match_running"] = True
+    context.bot_data["match_stop"] = False
+
+    def say(text: str):
+        asyncio.run_coroutine_threadsafe(
+            context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
+
+    def work():
+        return scanner.scan_matches(
+            acc.client, acc, params, base, baseline=baseline,
+            on_finds=lambda collection, finds: say(
+                menu.match_finds_text(collection, finds)),
+            on_progress=say,
+            should_stop=lambda: context.bot_data.get("match_stop"))
+
+    try:
+        result = await asyncio.to_thread(work)
+    except Exception as e:
+        log.exception("поиск сочетаний упал")
+        await update.message.reply_text(f"Поиск оборвался: {e}")
+        return
+    finally:
+        context.bot_data["match_running"] = False
+
+    if result.get("error"):
+        await update.message.reply_text(f"Не получилось: {result['error']}")
+        return
+    finds = result.get("finds") or []
+    await update.message.reply_text(
+        f"🎯 Готово.\n"
+        f"Коллекций: {result['collections']}, моделей с подобранным фоном "
+        f"проверено: {result['checked']}\n"
+        f"Найдено лотов без наценки за фон: {len(finds)}"
+        + (f"\nНе с чем было сравнить: {result['no_base']}" if result.get("no_base") else ""))
+    if finds:
+        data = BytesIO(("\ufeff" + menu.match_report_csv(finds)).encode("utf-8"))
+        data.name = f"match_{datetime.now():%Y-%m-%d_%H%M}.csv"
+        await update.message.reply_document(document=data, filename=data.name)
+
+
+async def cmd_matchstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/matchstop — остановить поиск сочетаний."""
+    if not authorized(update):
+        return
+    if not context.bot_data.get("match_running"):
+        await update.message.reply_text("Поиск сейчас не идёт.")
+        return
+    context.bot_data["match_stop"] = True
+    await update.message.reply_text("Остановлю после текущей коллекции.")
+
+
+async def cmd_matchtable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/matchtable — сама подборка: какой фон какой модели подходит. Запросов не делает."""
+    if not authorized(update):
+        return
+    base = await asyncio.to_thread(load_colors)
+    table = await asyncio.to_thread(colors.matching_table, base)
+    if not table:
+        await update.message.reply_text(
+            "Подбирать не из чего: база цветов пуста. Сначала /colors")
+        return
+    total = sum(len(v) for v in (base.get("models") or {}).values() if isinstance(v, dict))
+    await update.message.reply_text(
+        f"🎨 Подобрано фонов для {len(table)} моделей из {total}.\n"
+        f"У остальных ни один из {len(colors.backdrop_colors(base))} фонов не ближе "
+        f"ΔE {colors.MATCH_MAX_DELTA:g} — подбирать нечего.")
+    data = BytesIO(("\ufeff" + menu.match_table_csv(table)).encode("utf-8"))
+    data.name = f"matchtable_{datetime.now():%Y-%m-%d_%H%M}.csv"
+    await update.message.reply_document(document=data, filename=data.name)
+
+
 async def cmd_colorsprobe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /colorsprobe <slug> — проверка на одной вещи: качается ли картинка и
@@ -1788,6 +1908,9 @@ BOT_COMMANDS = [
     ("colors", "Собрать цвета моделей и фонов"),
     ("colorsstop", "Остановить сбор цветов"),
     ("colorsbase", "Что накопила база цветов"),
+    ("match", "Подходящий фон без наценки"),
+    ("matchstop", "Остановить поиск сочетаний"),
+    ("matchtable", "Какой фон какой модели подходит"),
     ("scanbase", "Что накопила база скана"),
     ("scanpublish", "Выложить базу скана в GitHub"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -1855,6 +1978,9 @@ def main():
     app.add_handler(CommandHandler("colors", cmd_colors, block=False))
     app.add_handler(CommandHandler("colorsstop", cmd_colorsstop, block=False))
     app.add_handler(CommandHandler("colorsbase", cmd_colorsbase, block=False))
+    app.add_handler(CommandHandler("match", cmd_match, block=False))
+    app.add_handler(CommandHandler("matchstop", cmd_matchstop, block=False))
+    app.add_handler(CommandHandler("matchtable", cmd_matchtable, block=False))
     app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
     app.add_handler(CommandHandler("scanpublish", cmd_scanpublish, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
