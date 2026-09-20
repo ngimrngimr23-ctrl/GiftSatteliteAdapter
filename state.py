@@ -249,10 +249,18 @@ def load_global_settings() -> dict:
 
 
 def save_global_settings(data: dict):
+    """
+    Дописать настройки, не затирая соседние.
+
+    Раньше сюда передавали словарь целиком, и каждый вызов сносил всё
+    остальное: смена интервала проверки цен обнуляла бы пороги подбора фонов.
+    """
+    merged = load_global_settings()
+    merged.update(data or {})
     if _UPSTASH_ENABLED:
-        _save_to_upstash_key(GLOBAL_REDIS_KEY, data)
+        _save_to_upstash_key(GLOBAL_REDIS_KEY, merged)
         return
-    _save_to_file_path(GLOBAL_STATE_FILE, data)
+    _save_to_file_path(GLOBAL_STATE_FILE, merged)
 
 
     

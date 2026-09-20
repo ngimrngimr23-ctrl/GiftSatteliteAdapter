@@ -148,7 +148,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/colorsbase — что накопила база цветов, файлом\n"
         "/match [допуск%] [мин_цена] [макс_цена] [совпадение%] [ΔE] — лоты, где фон подходит модели по цвету, а цена как у обычной. совпадение% — сколько площади модели должно совпасть с фоном\n"
         "/matchstop — остановить поиск\n"
-        "/matchtable [совпадение%] [ΔE] — сама подборка: какой фон какой модели подходит и на сколько процентов площади. Запросов не делает\n"
+        "/matchtable [совпадение%] [ΔE] — подборка: какой фон какой модели подходит. Заданные пороги запоминаются, /match берёт их же. Запросов не делает\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1502,6 +1502,14 @@ async def _send_colors_file(update: Update, base: dict):
         await update.message.reply_text(note)
 
 
+def _match_settings(context) -> dict:
+    """Пороги подбора фонов: что задали последним через /matchtable."""
+    return {
+        "coverage": context.bot_data.get("match_coverage", colors.MATCH_MIN_COVERAGE),
+        "tol": context.bot_data.get("match_tol", colors.MATCH_TOL),
+    }
+
+
 async def cmd_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /match [<acc>] [допуск%] [мин_цена] [макс_цена] — лоты, где фон подходит
@@ -1534,14 +1542,18 @@ async def cmd_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (IndexError, ValueError):
             return default
 
+    saved = _match_settings(context)
     params = scanner.MatchParams(
         tolerance_pct=number(0, 10.0),
         price_min=number(1, 0.0),
         price_max=number(2, 0.0),
-        min_coverage=number(3, colors.MATCH_MIN_COVERAGE * 100) / 100,
-        tol=number(4, colors.MATCH_TOL),
+        min_coverage=number(3, saved["coverage"] * 100) / 100,
+        tol=number(4, saved["tol"]),
     )
-    await update.message.reply_text("Читаю базу цветов…")
+    await update.message.reply_text(
+        f"Читаю базу цветов. Пороги подбора: {params.min_coverage * 100:.0f}% площади "
+        f"при ΔE {params.tol:g}"
+        + (" (заданы аргументами)" if len(args) > 3 else " (из /matchtable)") + "…")
     base = await asyncio.to_thread(load_colors)
     if not (base or {}).get("backdrops"):
         await update.message.reply_text(
@@ -1616,12 +1628,21 @@ async def cmd_matchtable(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (IndexError, ValueError):
             return default
 
-    min_coverage = number(0, colors.MATCH_MIN_COVERAGE * 100) / 100
-    tol = number(1, colors.MATCH_TOL)
+    saved = _match_settings(context)
+    min_coverage = number(0, saved["coverage"] * 100) / 100
+    tol = number(1, saved["tol"])
+    if args:
+        # Заданное здесь становится настройкой: /match потом берёт её же,
+        # иначе пороги пришлось бы повторять в каждой команде.
+        context.bot_data["match_coverage"] = min_coverage
+        context.bot_data["match_tol"] = tol
+        await asyncio.to_thread(save_global_settings,
+                                {"match_coverage": min_coverage, "match_tol": tol})
     # Отвечаем до расчёта, а не после: пар «цвет модели × фон» два с половиной
     # миллиона, и раньше команда молчала до самого результата.
     await update.message.reply_text(
-        f"Подбираю: не меньше {min_coverage * 100:.0f}% площади при ΔE {tol:g}…")
+        f"Подбираю: не меньше {min_coverage * 100:.0f}% площади при ΔE {tol:g}…"
+        + ("\nЭти пороги запомнил — /match возьмёт их же." if args else ""))
     base = await asyncio.to_thread(load_colors)
     table = await asyncio.to_thread(colors.matching_table, base,
                                     colors.MATCH_TOP, tol, min_coverage)
@@ -1972,6 +1993,9 @@ def main():
            .post_init(_post_init).post_shutdown(_post_shutdown).build())
     app.bot_data["accounts"] = accounts
     app.bot_data["cycle_seconds"] = cycle_seconds
+    app.bot_data["match_coverage"] = global_settings.get(
+        "match_coverage", colors.MATCH_MIN_COVERAGE)
+    app.bot_data["match_tol"] = global_settings.get("match_tol", colors.MATCH_TOL)
     # меню не импортирует bot.py (иначе вышел бы circular import), нужное отдаём через bot_data
     app.bot_data["authorized"] = authorized
     app.bot_data["restore_models"] = _restore_models
