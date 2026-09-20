@@ -20,6 +20,7 @@ from state import (AccountState, load_persisted, save_persisted, load_global_set
                    save_scan_baseline)
 from updater import run_cycle, fetch_sales_for
 import monochrome
+import colors
 import scanner
 import github_sync
 
@@ -139,6 +140,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scanstop — прервать идущий скан\n"
         "/watch [просадка%] [мин_цена] [макс_цена] [all] — дозор: гоняет по кругу одни листинги и ловит модели, чей флор только что ушёл вниз против своего же уровня. Круг — минуты, историю продаж не качает\n"
         "/watchstop — остановить дозор\n"
+        "/colorsprobe <slug> — проверка на одной вещи: скачать её картинку и вынуть цвет фона и цвет модели\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1334,6 +1336,49 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"просадок найдено {result['finds']}.")
 
 
+async def cmd_colorsprobe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /colorsprobe <slug> — проверка на одной вещи: качается ли картинка и
+    отделяется ли модель от фона.
+
+    Слаг берётся из любого лота, напр. PlushPepe-274. Запросов к gift-satellite
+    не делает вовсе — картинка качается с телеграма.
+    """
+    if not authorized(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Нужен слаг вещи, напр.: /colorsprobe PlushPepe-274\n"
+            "Слаг виден в ссылке на любой лот.")
+        return
+    slug = context.args[0].strip().strip("/").split("/")[-1]
+    await update.message.reply_text(f"Качаю {slug}…")
+    try:
+        got = await asyncio.to_thread(colors.probe, slug)
+    except colors.ColorError as e:
+        await update.message.reply_text(f"Не вышло: {e}")
+        return
+    except Exception as e:
+        log.exception("colorsprobe упал")
+        await update.message.reply_text(f"Сорвалось: {e}")
+        return
+
+    backdrop, model = got["backdrop_rgb"], got["model_rgb"]
+    await update.message.reply_text(
+        f"✅ {slug}\n"
+        f"{got['how']}, {got['bytes'] // 1024} КБ\n"
+        f"{got['url']}\n\n"
+        f"фон    RGB {backdrop} — {colors.color_name(backdrop)}\n"
+        f"модель RGB {model} — {colors.color_name(model)}\n"
+        f"расстояние между ними ΔE {colors.delta_e(backdrop, model):.0f}\n\n"
+        f"модель заняла {got['coverage'] * 100:.0f}% центра, "
+        f"на главный цвет пришлось {got['dominance'] * 100:.0f}% её пикселей\n\n"
+        "Сверь с картинкой ниже: если цвета названы верно — разбор работает.")
+    picture = BytesIO(got["image"])
+    picture.name = f"{slug}.jpg"
+    await update.message.reply_document(document=picture, filename=picture.name)
+
+
 async def cmd_watchstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/watchstop — остановить дозор после текущей коллекции."""
     if not authorized(update):
@@ -1574,6 +1619,7 @@ BOT_COMMANDS = [
     ("scanstop", "Прервать идущий скан"),
     ("watch", "Дозор: свежие просадки флора"),
     ("watchstop", "Остановить дозор"),
+    ("colorsprobe", "Проверить разбор цветов на одной вещи"),
     ("scanbase", "Что накопила база скана"),
     ("scanpublish", "Выложить базу скана в GitHub"),
     ("forceupdate", "Пересчитать цены сейчас"),
@@ -1637,6 +1683,7 @@ def main():
     app.add_handler(CommandHandler("scanstop", cmd_scanstop, block=False))
     app.add_handler(CommandHandler("watch", cmd_watch, block=False))
     app.add_handler(CommandHandler("watchstop", cmd_watchstop, block=False))
+    app.add_handler(CommandHandler("colorsprobe", cmd_colorsprobe, block=False))
     app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
     app.add_handler(CommandHandler("scanpublish", cmd_scanpublish, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
