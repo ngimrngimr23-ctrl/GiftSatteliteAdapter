@@ -386,10 +386,11 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
         if on_progress:
             on_progress(note + "\n\nНовых коллекций нет, проходить нечего.")
         return {"finds": [], "baseline": {}, "collections": 0,
-                "scanned": 0, "skipped": 0, "requests": client.request_count}
+                "scanned": 0, "skipped": 0, "requests": 0}
     if on_progress:
         on_progress(note)
 
+    started_requests = getattr(client, "total_requests", 0)
     collected, all_finds = {}, []
     done = skipped = 0
     for index, collection in enumerate(names, 1):
@@ -430,7 +431,8 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
             # ноль — значит показывать откат назад.
             on_progress(f"Пройдено {offset + index} из {offset + len(names)}: "
                         f"разобрано {done}, пропущено по цене {skipped}, "
-                        f"находок {len(all_finds)}, запросов {client.request_count}")
+                        f"находок {len(all_finds)}, запросов "
+                        f"{getattr(client, 'total_requests', 0) - started_requests}")
 
     if on_baseline and collected:
         try:
@@ -444,5 +446,5 @@ def scan_market(client, account, params: ScanParams, fetch_sales,
         "collections": len(names),
         "scanned": done,
         "skipped": skipped,
-        "requests": client.request_count,
+        "requests": getattr(client, "total_requests", 0) - started_requests,
     }

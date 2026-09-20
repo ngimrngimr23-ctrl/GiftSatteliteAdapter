@@ -10,6 +10,7 @@
 import asyncio
 import logging
 import statistics
+import time
 from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -407,6 +408,82 @@ def scan_summary_text(result: dict, params) -> str:
         lines.append(f"  из них на чёрных фонах: {black}")
         lines.append(f"  лучшая: {finds[0]['model']} — выгода {finds[0]['benefit']:.0f}%")
     return "\n".join(lines)
+
+
+def scan_baseline_text(baseline: dict) -> str:
+    """
+    Что накопила база скана. Главное здесь — распределение отношения
+    «цена лота / цена по сделкам»: по нему сразу видно, почему находок мало.
+    Если у подавляющего большинства моделей лот дороже сделок, то находка —
+    это не «чуть дешевле среднего», а разворот рынка, и их и должно быть мало.
+    """
+    collections = (baseline or {}).get("collections") or {}
+    if not collections:
+        return ("База скана пуста. Собирается во время /scan и сохраняется "
+                "каждые 5 коллекций.")
+
+    models = sum(len((c or {}).get("models") or {}) for c in collections.values())
+    with_ref = 0
+    ages = []
+    ks = {"Black": [], "Onyx Black": []}
+    now = time.time()
+    for snap in collections.values():
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("ts"):
+            ages.append((now - snap["ts"]) / 3600)
+        for name, info in (snap.get("premiums_full") or {}).items():
+            if name in ks and isinstance(info, dict) and info.get("k"):
+                ks[name].append(info["k"])
+        for data in (snap.get("models") or {}).values():
+            if isinstance(data, dict) and data.get("ref"):
+                with_ref += 1
+
+    lines = [
+        "📦 База скана",
+        f"Коллекций: {len(collections)}",
+        f"Моделей: {models}, из них с ценой по сделкам: {with_ref}",
+    ]
+    if ages:
+        lines.append(f"Возраст записей: свежайшей {min(ages):.0f}ч, "
+                     f"старейшей {max(ages):.0f}ч")
+    for name in ("Black", "Onyx Black"):
+        if ks[name]:
+            lines.append(f"Надбавка за {name}: медиана ×{statistics.median(ks[name]):.2f} "
+                         f"(по {len(ks[name])} коллекциям)")
+    return "\n".join(lines)
+
+
+def scan_baseline_csv(baseline: dict) -> str:
+    """Вся база файлом: по строке на модель."""
+    rows = ["коллекция;модель;цена по сделкам;сделок в месяц;сделок в расчёте;"
+            "редкость %;floor коллекции;K Black;K Onyx Black;возраст записи, ч"]
+
+    def num(value, digits=2):
+        if value is None:
+            return ""
+        return f"{value:.{digits}f}".replace(".", ",")
+
+    now = time.time()
+    for collection, snap in sorted((baseline or {}).get("collections", {}).items()):
+        if not isinstance(snap, dict):
+            continue
+        prem = snap.get("premiums_full") or {}
+        k_black = (prem.get("Black") or {}).get("k")
+        k_onyx = (prem.get("Onyx Black") or {}).get("k")
+        age = (now - snap["ts"]) / 3600 if snap.get("ts") else None
+        for model, data in sorted((snap.get("models") or {}).items()):
+            if not isinstance(data, dict):
+                continue
+            rarity = data.get("rarity")
+            rows.append(";".join([
+                collection.replace(";", ","), model.replace(";", ","),
+                num(data.get("ref")), num(data.get("per_month"), 1),
+                str(data.get("used", "")),
+                num(rarity / 10, 1) if rarity is not None else "",
+                num(snap.get("floor")), num(k_black), num(k_onyx), num(age, 1),
+            ]))
+    return "\n".join(rows)
 
 
 def refresh_summary_text(acc) -> str:

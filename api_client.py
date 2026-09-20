@@ -65,6 +65,10 @@ class GiftApiClient:
         # пачками, которые видно в логах.
         self._call_lock = threading.Lock()
         self.request_count = 0  # сбрасывается в начале цикла — видно, во что обошёлся автоподбор
+        # Сквозной счётчик за жизнь процесса: request_count обнуляет каждый цикл
+        # цен, а скан идёт часами через тот же клиент, и его прогресс по нему
+        # показывал не всего, а «с последнего цикла».
+        self.total_requests = 0
 
     def _headers(self):
         return {"Authorization": f"Token {self.token}"}
@@ -98,6 +102,7 @@ class GiftApiClient:
         for attempt in range(MAX_429_RETRIES + 1):
             self._throttle()
             self.request_count += 1
+            self.total_requests += 1
             url = f"{self.base_url}{path}"
             resp = requests.request(method, url, headers=self._headers(), timeout=15, **kwargs)
             if resp.status_code != 429:

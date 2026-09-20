@@ -136,6 +136,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "цены модели; fast — быстрый проход по дешёвому краю, missing — только коллекции, "
         "которых ещё нет в базе\n"
         "/scanstop — прервать идущий скан\n"
+        "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/forceupdate — пересчитать цены сейчас\n"
         "/setinterval <мин> — как часто (в минутах) проверяются актуальные цены; без аргумента — показать текущее значение\n"
         "/pause <acc> / /resume <acc> — остановить/возобновить конкретный аккаунт (acc обязателен)\n"
@@ -1170,6 +1171,19 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_document(document=data, filename=data.name)
 
 
+async def cmd_scanbase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны."""
+    if not authorized(update):
+        return
+    baseline = await asyncio.to_thread(load_scan_baseline)
+    await update.message.reply_text(menu.scan_baseline_text(baseline))
+    if not (baseline or {}).get("collections"):
+        return
+    data = BytesIO(("\ufeff" + menu.scan_baseline_csv(baseline)).encode("utf-8"))
+    data.name = f"scanbase_{datetime.now():%Y-%m-%d_%H%M}.csv"
+    await update.message.reply_document(document=data, filename=data.name)
+
+
 async def cmd_scanstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/scanstop — прервать идущий скан после текущей коллекции."""
     if not authorized(update):
@@ -1409,6 +1423,7 @@ BOT_COMMANDS = [
     ("monochrome", "Пары подарок+фон: где больше всего моделей в один floor"),
     ("scan", "Скан рынка: листинги ниже реальной цены модели"),
     ("scanstop", "Прервать идущий скан"),
+    ("scanbase", "Что накопила база скана"),
     ("forceupdate", "Пересчитать цены сейчас"),
     ("setinterval", "Как часто (в минутах) проверяются цены"),
     ("pause", "Остановить конкретный аккаунт"),
@@ -1468,6 +1483,7 @@ def main():
     # случай: /scanstop молчал, потому что ждал окончания /scan
     app.add_handler(CommandHandler("scan", cmd_scan, block=False))
     app.add_handler(CommandHandler("scanstop", cmd_scanstop, block=False))
+    app.add_handler(CommandHandler("scanbase", cmd_scanbase, block=False))
     app.add_handler(CommandHandler("setsalesdepth", cmd_setsalesdepth))
     app.add_handler(CommandHandler("setprobe", cmd_setprobe))
     app.add_handler(CommandHandler("setmodelsinterval", cmd_setmodelsinterval))
