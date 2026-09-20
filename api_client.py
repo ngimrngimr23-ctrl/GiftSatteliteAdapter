@@ -117,8 +117,23 @@ class GiftApiClient:
                     self.min_interval = min(MAX_THROTTLE, self.min_interval * THROTTLE_STEP)
                     log.info("сбавляю темп: пауза между запросами теперь %.2fс", self.min_interval)
             delay = RETRY_BACKOFF_SECONDS * (attempt + 1)
-            log.warning("429 rate limit on %s, backing off %.1fs (попытка %d/%d)",
-                        path, delay, attempt + 1, MAX_429_RETRIES)
+            # Что именно сказал сервис. Нужно, потому что 429 прилетают даже
+            # при 0.57 запроса в секунду против документированных двух —
+            # значит лимит либо строже, либо считается не по секундам, а
+            # квотой. Retry-After, если он есть, отвечает на это прямо.
+            retry_after = (resp.headers.get("Retry-After")
+                           or resp.headers.get("X-RateLimit-Reset") or "")
+            body = _short_error(resp)[:200]
+            log.warning("429 rate limit on %s, пауза %.2fс, backing off %.1fs "
+                        "(попытка %d/%d)%s%s",
+                        path, self.min_interval, delay, attempt + 1, MAX_429_RETRIES,
+                        f", Retry-After={retry_after}" if retry_after else "",
+                        f", ответ: {body}" if body else "")
+            if retry_after:
+                try:  # сервис сам сказал, сколько ждать — слушаемся его
+                    delay = max(delay, float(retry_after))
+                except ValueError:
+                    pass
             time.sleep(delay)
 
         if resp.status_code >= 400:
