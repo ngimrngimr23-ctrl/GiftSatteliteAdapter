@@ -154,6 +154,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/premium target — то же прицельно: спрашивает историю ровно по парам модель+фон. Быстрее и только так ловятся сильные совпадения\n"
         "/premiumstop — остановить замер\n"
         "/premiumbase — ответ по уже собранному, без запросов\n"
+        "/version — какой коммит сейчас работает: проверить, что деплой подхватился\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1507,6 +1508,34 @@ async def _send_colors_file(update: Update, base: dict):
         await update.message.reply_text(note)
 
 
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /version — какой коммит сейчас работает.
+
+    Нужна потому, что один раз Render не подхватил свежий деплой, и это
+    вскрылось только по цифре в отчёте замера: он считал по 15 000 продаж —
+    ровно тот потолок, который был убран коммитом раньше. Гадать об этом по
+    поведению бота не должно приходиться.
+    """
+    if not authorized(update):
+        return
+    commit = os.environ.get("RENDER_GIT_COMMIT") or ""
+    branch = os.environ.get("RENDER_GIT_BRANCH") or ""
+    started = context.bot_data.get("started_at")
+    uptime = ""
+    if started:
+        minutes = (time.time() - started) / 60
+        uptime = (f"\nЗапущен {minutes / 60:.1f} ч назад" if minutes >= 90
+                  else f"\nЗапущен {minutes:.0f} мин назад")
+    await update.message.reply_text(
+        (f"Коммит: {commit[:7] or 'неизвестен'}"
+         + (f"\nВетка: {branch}" if branch else "")
+         + uptime
+         + ("\n\nRENDER_GIT_COMMIT не задан — значит запущено не деплоем Render "
+            "или переменная выключена в настройках сервиса." if not commit else ""))
+    )
+
+
 async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /premium [<acc>] [страниц] — замерить, платит ли рынок за совпадение цвета
@@ -2094,6 +2123,7 @@ BOT_COMMANDS = [
     ("match", "Подходящий фон без наценки"),
     ("matchstop", "Остановить поиск сочетаний"),
     ("matchtable", "Какой фон какой модели подходит"),
+    ("version", "Какой коммит сейчас работает"),
     ("premium", "Замер: платят ли за совпадение цвета"),
     ("premiumstop", "Остановить замер"),
     ("premiumbase", "Ответ замера по собранному"),
@@ -2142,6 +2172,7 @@ def main():
     app.bot_data["match_coverage"] = global_settings.get(
         "match_coverage", colors.MATCH_MIN_COVERAGE)
     app.bot_data["match_tol"] = global_settings.get("match_tol", colors.MATCH_TOL)
+    app.bot_data["started_at"] = time.time()
     # меню не импортирует bot.py (иначе вышел бы circular import), нужное отдаём через bot_data
     app.bot_data["authorized"] = authorized
     app.bot_data["restore_models"] = _restore_models
@@ -2174,6 +2205,7 @@ def main():
     app.add_handler(CommandHandler("match", cmd_match, block=False))
     app.add_handler(CommandHandler("matchstop", cmd_matchstop, block=False))
     app.add_handler(CommandHandler("matchtable", cmd_matchtable, block=False))
+    app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(CommandHandler("premium", cmd_premium, block=False))
     app.add_handler(CommandHandler("premiumstop", cmd_premiumstop, block=False))
     app.add_handler(CommandHandler("premiumbase", cmd_premiumbase, block=False))
