@@ -244,21 +244,30 @@ def extract_colors(data: bytes, size: int = 160) -> dict:
     # сотни, а результат тот же — внутри ведра цвет одинаковый.
     lo, hi = int(size * 0.18), int(size * 0.82)
     total = (hi - lo) ** 2
-    model_buckets, kept = {}, 0
+    model_buckets, plain_buckets, kept = {}, {}, 0
     for key, group in _buckets([px[x, y] for x in range(lo, hi)
                                 for y in range(lo, hi)]).items():
         lab = rgb_to_lab(_median_rgb(group))
         if any(math.sqrt(sum((a - b) ** 2 for a, b in zip(lab, ref))) < BACKDROP_DELTA_E
                for ref in refs):
+            plain_buckets[key] = group
             continue
         model_buckets[key] = group
         kept += len(group)
     if kept < total * 0.02:
         raise ColorError("модель не отделилась от фона — почти весь центр совпал с фоном")
 
+    # Фон у телеграма — радиальный градиент: в центре светлее, по краям темнее.
+    # Рамка даёт поэтому самый тёмный край, а модель лежит на светлой середине:
+    # у Ivory White по рамке выходило (167,164,157) — серый, а не белый.
+    # Второй замер берём там, где фон соседствует с моделью.
+    near = _cluster(plain_buckets, sum(len(g) for g in plain_buckets.values()), top=1)
+    backdrop_center = near[0]["rgb"] if near else backdrop
+
     palette = _cluster(model_buckets, kept, top=PALETTE_SIZE)
     return {
         "backdrop_rgb": backdrop,
+        "backdrop_center_rgb": backdrop_center,
         "backdrop_palette": backdrop_palette,
         "model_rgb": palette[0]["rgb"],
         "palette": palette,
@@ -430,8 +439,11 @@ def collect(offers_for, collections: list, per_model: int = SAMPLES_PER_MODEL,
                     shot_backdrops.append(backdrop)
                     seen = backdrops.setdefault(backdrop, {})
                     samples = seen.setdefault("samples", [])
+                    centre = seen.setdefault("center_samples", [])
                     samples.append(list(got["backdrop_rgb"]))
+                    centre.append(list(got["backdrop_center_rgb"]))
                     del samples[:-BACKDROP_SAMPLES]
+                    del centre[:-BACKDROP_SAMPLES]
             palette = merge_palettes(palettes)
             if palette:
                 done[model] = {"palette": palette, "samples": len(palettes),
@@ -469,10 +481,102 @@ def _pack(models: dict, backdrops: dict) -> dict:
     out = {}
     for name, seen in backdrops.items():
         samples = (seen or {}).get("samples") or []
-        if not samples:
+        centre = (seen or {}).get("center_samples") or []
+        if not samples and not centre:
             continue
-        out[name] = {"rgb": [sorted(s[i] for s in samples)[len(samples) // 2]
-                             for i in range(3)],
-                     "n": len(samples),
-                     "samples": samples[-BACKDROP_SAMPLES:]}
+        entry = {"n": len(samples) or len(centre)}
+        if samples:
+            entry["rgb"] = [sorted(s[i] for s in samples)[len(samples) // 2]
+                            for i in range(3)]
+            entry["samples"] = samples[-BACKDROP_SAMPLES:]
+        if centre:
+            entry["center_rgb"] = [sorted(s[i] for s in centre)[len(centre) // 2]
+                                   for i in range(3)]
+            entry["center_samples"] = centre[-BACKDROP_SAMPLES:]
+        out[name] = entry
     return {"ts": time.time(), "models": models, "backdrops": out}
+
+
+BACKDROP_TARGET = 12    # сколько замеров на фон достаточно
+
+
+def collect_backdrops(offers_for, collections: list, target: int = BACKDROP_TARGET,
+                      known: dict | None = None, on_progress=None, on_save=None,
+                      should_stop=None, save_every: int = 10) -> dict:
+    """
+    Только цвета фонов. Отдельный проход нужен потому, что фонов восемь
+    десятков, а моделей почти пять тысяч: пересобрать фоны стоит сотню
+    картинок, а не восемь тысяч.
+
+    Берём по одному лоту на фон, пока у каждого не наберётся target замеров.
+    Палитры моделей при этом не трогаются — они от цвета фона не зависят.
+    """
+    models = dict((known or {}).get("models") or {})
+    backdrops = dict((known or {}).get("backdrops") or {})
+    stats = {"images": 0, "errors": 0, "backdrops": 0}
+    last = 0.0
+
+    for index, collection in enumerate(collections, 1):
+        if SHUTDOWN.is_set() or (should_stop and should_stop()):
+            break
+        try:
+            offers = offers_for(collection)
+        except Exception as e:
+            log.warning("листинги %s: %s", collection, e)
+            stats["errors"] += 1
+            continue
+
+        wanted = {}
+        for offer in offers:
+            backdrop = (offer.get("backdrop") or "").strip()
+            slug = (offer.get("slug") or "").strip()
+            if not backdrop or not slug or backdrop in wanted:
+                continue
+            have = len(((backdrops.get(backdrop) or {}).get("center_samples")) or [])
+            if have < target:
+                wanted[backdrop] = offer
+
+        for backdrop, offer in wanted.items():
+            if SHUTDOWN.is_set() or (should_stop and should_stop()):
+                break
+            wait = MIN_INTERVAL - (time.monotonic() - last)
+            if wait > 0:
+                time.sleep(wait)
+            last = time.monotonic()
+            try:
+                data, _, _ = fetch_image(offer["slug"])
+                got = extract_colors(data)
+            except ColorError as e:
+                log.debug("фон %s (%s): %s", backdrop, offer["slug"], e)
+                stats["errors"] += 1
+                continue
+            stats["images"] += 1
+            seen = backdrops.setdefault(backdrop, {})
+            edge = seen.setdefault("samples", [])
+            centre = seen.setdefault("center_samples", [])
+            edge.append(list(got["backdrop_rgb"]))
+            centre.append(list(got["backdrop_center_rgb"]))
+            del edge[:-BACKDROP_SAMPLES]
+            del centre[:-BACKDROP_SAMPLES]
+
+        if on_progress and index % 10 == 0:
+            ready = sum(1 for v in backdrops.values()
+                        if len((v or {}).get("center_samples") or []) >= target)
+            on_progress(f"Фоны: {index} из {len(collections)} коллекций, "
+                        f"набрано полностью {ready} из {len(backdrops)}, "
+                        f"картинок {stats['images']}, ошибок {stats['errors']}")
+        if on_save and index % save_every == 0:
+            try:
+                on_save(_pack(models, backdrops))
+            except Exception as e:
+                log.warning("не смог сохранить фоны на %d-й коллекции: %s", index, e)
+
+    packed = _pack(models, backdrops)
+    stats["backdrops"] = len(packed.get("backdrops") or {})
+    if on_save:
+        try:
+            on_save(packed)
+        except Exception as e:
+            log.warning("не смог сохранить фоны в конце: %s", e)
+    packed["stats"] = stats
+    return packed

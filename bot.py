@@ -143,7 +143,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watch [просадка%] [мин_цена] [макс_цена] [all] — дозор: гоняет по кругу одни листинги и ловит модели, чей флор только что ушёл вниз против своего же уровня. Круг — минуты, историю продаж не качает\n"
         "/watchstop — остановить дозор\n"
         "/colorsprobe <slug> — проверка на одной вещи: скачать её картинку и вынуть цвет фона и цвет модели\n"
-        "/colors [снимков] [thin] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма. thin — добрать те, что собрались с одного фона\n"
+        "/colors [снимков] [thin] [back] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма. thin — добрать модели, снятые с одного фона; back — пересобрать только фоны\n"
         "/colorsstop — остановить сбор\n"
         "/colorsbase — что накопила база цветов, файлом\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
@@ -1373,8 +1373,9 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
         acc = next((a for a in accounts.values() if not a.paused), None) or \
             next(iter(accounts.values()))
     words = {a.lower() for a in args}
-    args = [a for a in args if a.lower() != "thin"]
+    args = [a for a in args if a.lower() not in ("thin", "back")]
     redo_thin = "thin" in words
+    only_backdrops = "back" in words
     try:
         per_model = max(1, min(4, int(args[0])))
     except (IndexError, ValueError):
@@ -1400,7 +1401,15 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.run_coroutine_threadsafe(
             context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
 
-    await update.message.reply_text(
+    if only_backdrops:
+        await update.message.reply_text(
+            f"🎨 Пересобираю только фоны.\n"
+            f"Коллекций: {len(names)}, замеров на фон: {colors.BACKDROP_TARGET}.\n"
+            f"Фонов восемь десятков против почти пяти тысяч моделей, поэтому это "
+            f"сотня картинок, а не восемь тысяч.\n"
+            "Остановить: /colorsstop")
+    else:
+        await update.message.reply_text(
         f"🎨 Собираю цвета.\n"
         f"Коллекций: {len(names)}, снимков на модель: {per_model}.\n"
         f"Запросов к API — по три на коллекцию, картинки идут с телеграма.\n"
@@ -1421,6 +1430,10 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return out
 
     def work():
+        if only_backdrops:
+            return colors.collect_backdrops(
+                offers_for, names, known=known, on_progress=say, on_save=save_colors,
+                should_stop=lambda: context.bot_data.get("colors_stop"))
         return colors.collect(
             offers_for, names, per_model=per_model, known=known,
             on_progress=say, on_save=save_colors, redo_thin=redo_thin,
@@ -1436,12 +1449,17 @@ async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["colors_running"] = False
 
     stats = result.get("stats") or {}
-    await update.message.reply_text(
-        f"🎨 Готово.\n"
-        f"Новых моделей: {stats.get('models', 0)}, картинок скачано: "
-        f"{stats.get('images', 0)}\n"
-        f"Пропущено готовых: {stats.get('skipped', 0)}, ошибок: {stats.get('errors', 0)}\n\n"
-        + menu.colors_text(result))
+    if only_backdrops:
+        head = (f"🎨 Готово.\nФонов в базе: {stats.get('backdrops', 0)}, "
+                f"картинок скачано: {stats.get('images', 0)}, "
+                f"ошибок: {stats.get('errors', 0)}\n\n")
+    else:
+        head = (f"🎨 Готово.\n"
+                f"Новых моделей: {stats.get('models', 0)}, картинок скачано: "
+                f"{stats.get('images', 0)}\n"
+                f"Пропущено готовых: {stats.get('skipped', 0)}, "
+                f"ошибок: {stats.get('errors', 0)}\n\n")
+    await update.message.reply_text(head + menu.colors_text(result))
     await _send_colors_file(update, result)
 
 

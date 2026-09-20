@@ -104,20 +104,44 @@ def _request(method: str, url: str, payload: dict | None = None):
         return json.loads(body) if body else {}
 
 
-def _ensure_branch():
-    """Создать ветку выгрузки, если её ещё нет."""
+class NoBranchRights(Exception):
+    """
+    Токену не дали заводить ветки.
+
+    Отступать при этом в ветку по умолчанию нельзя, хотя соблазн есть: туда
+    смотрит Render, и каждая выгрузка стала бы передеплоем — то есть обрывала
+    бы идущий дозор или сбор. Да и права на запись файла у такого токена всё
+    равно нет: и создание ветки, и запись файла — это одно и то же разрешение
+    Contents.
+    """
+
+
+def _ensure_branch(branch: str) -> str:
+    """
+    Убедиться, что ветка выгрузки есть. Возвращает ветку, в которую писать.
+
+    Если завести ветку нельзя, бросаем NoBranchRights — там же сказано, почему
+    отступать в ветку по умолчанию хуже, чем не выгружать вовсе.
+    """
     try:
-        _request("GET", f"{API}/repos/{REPO}/git/ref/heads/{BRANCH}")
-        return
+        _request("GET", f"{API}/repos/{REPO}/git/ref/heads/{branch}")
+        return branch
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
     repo = _request("GET", f"{API}/repos/{REPO}")
     base = repo.get("default_branch") or "main"
-    ref = _request("GET", f"{API}/repos/{REPO}/git/ref/heads/{base}")
-    _request("POST", f"{API}/repos/{REPO}/git/refs",
-             {"ref": f"refs/heads/{BRANCH}", "sha": ref["object"]["sha"]})
-    log.info("создал ветку %s для выгрузки базы", BRANCH)
+    try:
+        ref = _request("GET", f"{API}/repos/{REPO}/git/ref/heads/{base}")
+        _request("POST", f"{API}/repos/{REPO}/git/refs",
+                 {"ref": f"refs/heads/{branch}", "sha": ref["object"]["sha"]})
+    except urllib.error.HTTPError as e:
+        if e.code not in (403, 404):
+            raise
+        log.warning("не могу завести ветку %s: HTTP %s", branch, e.code)
+        raise NoBranchRights(str(e.code))
+    log.info("создал ветку %s для выгрузки базы", branch)
+    return branch
 
 
 def publish(text: str, message: str, path: str | None = None) -> str:
@@ -134,12 +158,21 @@ def publish(text: str, message: str, path: str | None = None) -> str:
         return f"Не отправил: в данных нашлось похожее на секрет ({hint})."
 
     path = path or PATH
+    branch = BRANCH
     try:
-        _ensure_branch()
+        try:
+            branch = _ensure_branch(BRANCH)
+        except NoBranchRights as e:
+            return (f"Не выгрузил: токену нельзя завести ветку {BRANCH} (HTTP {e}).\n"
+                    f"Нужно разрешение Contents: Read and write на репозиторий "
+                    f"{REPO} — тем же разрешением делается и запись файла, так что "
+                    f"без него выгрузка не пройдёт никуда.\n"
+                    f"Если ветка {BRANCH} уже есть, проверь, что имя совпадает: "
+                    f"оно задаётся переменной GITHUB_SYNC_BRANCH.")
         sha = None
         try:
             existing = _request(
-                "GET", f"{API}/repos/{REPO}/contents/{path}?ref={BRANCH}")
+                "GET", f"{API}/repos/{REPO}/contents/{path}?ref={branch}")
             sha = existing.get("sha")
         except urllib.error.HTTPError as e:
             if e.code != 404:
@@ -147,7 +180,7 @@ def publish(text: str, message: str, path: str | None = None) -> str:
         payload = {
             "message": message,
             "content": base64.b64encode(text.encode("utf-8")).decode(),
-            "branch": BRANCH,
+            "branch": branch,
         }
         if sha:
             payload["sha"] = sha
@@ -160,4 +193,4 @@ def publish(text: str, message: str, path: str | None = None) -> str:
         log.warning("не смог выгрузить базу в GitHub: %s", e)
         return f"Не получилось выгрузить: {e}"
 
-    return f"Выгружено в {REPO}, ветка {BRANCH}, файл {path}"
+    return f"Выгружено в {REPO}, ветка {branch}, файл {path}"

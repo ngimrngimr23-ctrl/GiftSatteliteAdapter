@@ -990,8 +990,15 @@ def colors_text(base: dict) -> str:
         lines.append("\nФоны, самые частые:")
         top = sorted(backdrops.items(), key=lambda kv: -(kv[1] or {}).get("n", 0))[:12]
         for name, info in top:
-            rgb = tuple((info or {}).get("rgb") or (0, 0, 0))
-            lines.append(f"• {name} — {color_name_of(rgb)} {rgb}, замеров {info.get('n', 0)}")
+            # у модели фон светлее, чем по краю: он нарисован радиальным
+            # градиентом, а модель сидит в середине. Показываем тот цвет,
+            # рядом с которым модель и находится.
+            rgb = tuple((info or {}).get("center_rgb")
+                        or (info or {}).get("rgb") or (0, 0, 0))
+            edge = (info or {}).get("rgb")
+            mark = "" if (info or {}).get("center_rgb") else "  ⚠️ только край"
+            lines.append(f"• {name} — {color_name_of(rgb)} {rgb}, "
+                         f"замеров {info.get('n', 0)}{mark}")
     return "\n".join(lines)
 
 
@@ -1005,10 +1012,13 @@ def colors_csv(base: dict) -> str:
     """Вся база цветов файлом: по строке на цвет модели и по строке на фон."""
     rows = ["тип;коллекция;имя;цвет №;доля %;снимков;R;G;B;имя цвета"]
     for name, info in sorted(((base or {}).get("backdrops") or {}).items()):
-        rgb = list((info or {}).get("rgb") or [0, 0, 0])
-        rows.append(";".join(["фон", "", str(name).replace(";", ","), "1", "",
-                              str((info or {}).get("n", 0)), *map(str, rgb),
-                              color_name_of(rgb)]))
+        for kind, key in (("фон", "center_rgb"), ("фон-край", "rgb")):
+            rgb = (info or {}).get(key)
+            if not rgb:
+                continue
+            rows.append(";".join([kind, "", str(name).replace(";", ","), "1", "",
+                                  str((info or {}).get("n", 0)), *map(str, rgb),
+                                  color_name_of(rgb)]))
     for collection, models in sorted(((base or {}).get("models") or {}).items()):
         if not isinstance(models, dict):
             continue
