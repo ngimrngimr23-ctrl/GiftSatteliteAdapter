@@ -176,6 +176,39 @@ def collect(client, account, collections: list, colors_base: dict,
     return result
 
 
+def _unpack(data: dict) -> tuple:
+    """
+    Собранное -> {фон: [(доля совпадения, доля цены)]}.
+
+    Понимает и прежний формат со списком пар: первый полный прогон сохранился
+    именно так, и перекачивать час ради смены раскладки незачем.
+    """
+    by_backdrop, total = {}, 0
+    for name, buckets in ((data or {}).get("cells") or {}).items():
+        items = []
+        for bucket, values in buckets.items():
+            share = int(bucket) * SHARE_STEP
+            items += [(share, value) for value in values]
+        by_backdrop[name] = items
+        total += len(items)
+    for backdrop, share, ratio in ((data or {}).get("pairs") or []):
+        by_backdrop.setdefault(backdrop, []).append((share, ratio))
+        total += 1
+    return by_backdrop, total
+
+
+def backdrop_levels(data: dict) -> dict:
+    """
+    Собственный уровень цены каждого фона: во сколько раз вещь с ним дороже
+    обычной такой же. Нужен, чтобы отделить цену фона от вклада сочетания.
+    """
+    by_backdrop, _ = _unpack(data)
+    return {name: statistics.median(r for _, r in items)
+            for name, items in by_backdrop.items()
+            if len(items) >= MIN_SALES_PER_BACKDROP
+            and statistics.median(r for _, r in items) > 0}
+
+
 def summarise(data: dict, match_from: float = 0.5) -> dict:
     """
     Из пар «совпадение -> доля цены» в ответ.
@@ -190,18 +223,9 @@ def summarise(data: dict, match_from: float = 0.5) -> dict:
     целиком, и разница схлопывается в ноль. Такие фоны просто не годятся для
     замера, и здесь они отсеиваются явно, а не портят ответ молча.
     """
-    cells = (data or {}).get("cells") or {}
-    if not cells:
+    by_backdrop, total = _unpack(data)
+    if not by_backdrop:
         return {"error": "продаж нет — замер не собран"}
-
-    by_backdrop, total = {}, 0
-    for name, buckets in cells.items():
-        items = []
-        for bucket, values in buckets.items():
-            share = int(bucket) * SHARE_STEP
-            items += [(share, value) for value in values]
-        by_backdrop[name] = items
-        total += len(items)
 
     per_backdrop, unusable = [], 0
     for name, items in by_backdrop.items():
@@ -252,3 +276,90 @@ def summarise(data: dict, match_from: float = 0.5) -> dict:
         "premium_pct": answer,
         "match_from": match_from,
     }
+
+
+# --- прицельный замер -------------------------------------------------------
+#
+# Случайной выборкой сильные совпадения не поймать: их 0.03% рынка, и даже во
+# всех 47 тысячах продаж их набирается тринадцать. Но история фильтруется и по
+# модели, и по фону — значит можно спросить ровно то, что нужно, вместо того
+# чтобы просеивать рынок целиком.
+
+TARGET_PAGES = 2            # страниц на запрос, по 20 продаж
+TARGET_MIN_SALES = 3        # меньше — медиана ничего не значит
+
+
+def _filtered(client, collection, account, models, backdrops, pages):
+    out = []
+    for page in range(pages):
+        if SHUTDOWN.is_set():
+            break
+        try:
+            data = client.get_history(collection, models=models, backdrops=backdrops,
+                                      sort_by="date", page=page)
+        except ApiError as e:
+            account.record_error(f"premium target {collection} {models}/{backdrops}: {e}")
+            break
+        content = (data or {}).get("content") or []
+        out += [s for s in content if s.get("normalizedPrice")]
+        meta = (data or {}).get("page") or {}
+        if not content or (meta.get("totalPages") is not None
+                           and page + 1 >= meta["totalPages"]):
+            break
+    return out
+
+
+def targeted(client, account, table: dict, levels: dict,
+             pages: int = TARGET_PAGES, min_sales: int = TARGET_MIN_SALES,
+             on_progress=None, should_stop=None) -> dict:
+    """
+    Спросить историю ровно по парам «модель + подходящий ей фон».
+
+    По каждой модели два запроса: её продажи с этим фоном и её продажи вообще.
+    Сравниваем медианы — получается надбавка за сочетание на этой модели.
+    Дальше делим на собственный уровень фона, иначе намеряли бы, что Onyx Black
+    дорог сам по себе.
+    """
+    rows, skipped = [], {"мало продаж с фоном": 0, "мало прочих продаж": 0,
+                         "уровень фона неизвестен": 0}
+    keys = sorted(table)
+    for index, key in enumerate(keys, 1):
+        if SHUTDOWN.is_set() or (should_stop and should_stop()):
+            break
+        collection, model = key
+        backdrop, share, delta = table[key]["backdrops"][0]
+        level = levels.get(backdrop.strip().lower())
+        if not level:
+            skipped["уровень фона неизвестен"] += 1
+            continue
+        with_backdrop = _filtered(client, collection, account, [model], [backdrop], pages)
+        if len(with_backdrop) < min_sales:
+            skipped["мало продаж с фоном"] += 1
+            continue
+        everything = _filtered(client, collection, account, [model], None, pages + 1)
+        others = [s["normalizedPrice"] for s in everything
+                  if (s.get("backdropName") or "").strip().lower()
+                  != backdrop.strip().lower()]
+        if len(others) < min_sales:
+            skipped["мало прочих продаж"] += 1
+            continue
+        matched = statistics.median(s["normalizedPrice"] for s in with_backdrop)
+        base = statistics.median(others)
+        if base <= 0:
+            continue
+        rows.append({
+            "collection": collection, "model": model, "backdrop": backdrop,
+            "share": share, "delta": delta,
+            "matched_n": len(with_backdrop), "others_n": len(others),
+            "raw": (matched / base - 1) * 100,
+            "premium": (matched / base / level - 1) * 100,
+            "level": level,
+        })
+        if on_progress and index % 20 == 0:
+            on_progress(f"Прицельный замер: {index} из {len(keys)} моделей, "
+                        f"посчитано {len(rows)}")
+
+    answer = statistics.median(r["premium"] for r in rows) if rows else None
+    rows.sort(key=lambda r: -r["premium"])
+    return {"ts": time.time(), "rows": rows, "premium_pct": answer,
+            "checked": len(keys), "skipped": skipped}

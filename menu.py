@@ -1141,3 +1141,52 @@ def premium_csv(summary: dict) -> str:
                               f"{p['premium']:.1f}".replace(".", ","),
                               str(p["matched"]), str(p["plain"])]))
     return "\n".join(rows)
+
+
+def premium_target_text(result: dict) -> str:
+    """Ответ прицельного замера — по парам «модель + подходящий ей фон»."""
+    rows = result.get("rows") or []
+    answer = result.get("premium_pct")
+    lines = ["🎯 Надбавка за сочетание, замер по парам модель+фон"]
+    if answer is None:
+        lines.append("\nНи по одной паре не набралось продаж. Сочетания слишком редки "
+                     "даже для прицельного запроса.")
+    else:
+        lines.append(f"\n➡️  {answer:+.1f}%\n")
+        if abs(answer) < 4:
+            lines.append("Это ноль. За сочетание цвета рынок не платит.")
+        elif answer > 0:
+            lines.append(f"Вещь с подходящим фоном уходит дороже обычной такой же "
+                         f"на {answer:.0f}% — сверх того, что стоит сам фон.")
+        else:
+            lines.append("Отрицательная: с подходящим фоном уходит дешевле.")
+    lines.append(f"\nПар в счёте: {len(rows)} из {result.get('checked', 0)} проверенных")
+    for reason, count in (result.get("skipped") or {}).items():
+        if count:
+            lines.append(f"   пропущено, {reason}: {count}")
+    if rows:
+        lines.append("\nГде сочетание ценят больше всего:")
+        for r in rows[:6]:
+            lines.append(f"   {r['model']} · {r['backdrop']} — {r['premium']:+.0f}% "
+                         f"({r['matched_n']} против {r['others_n']} продаж)")
+        lines.append("\nГде меньше всего:")
+        for r in rows[-4:]:
+            lines.append(f"   {r['model']} · {r['backdrop']} — {r['premium']:+.0f}%")
+    return "\n".join(lines)
+
+
+def premium_target_csv(result: dict) -> str:
+    rows = ["коллекция;модель;фон;совпало %;ΔE;надбавка %;без поправки %;"
+            "уровень фона;продаж с фоном;прочих продаж"]
+
+    def num(value, digits=1):
+        return "" if value is None else f"{value:.{digits}f}".replace(".", ",")
+
+    for r in result.get("rows") or []:
+        rows.append(";".join([
+            str(r["collection"]).replace(";", ","), str(r["model"]).replace(";", ","),
+            str(r["backdrop"]).replace(";", ","), num(r["share"] * 100, 0),
+            num(r["delta"]), num(r["premium"]), num(r["raw"]), num(r["level"], 3),
+            str(r["matched_n"]), str(r["others_n"]),
+        ]))
+    return "\n".join(rows)

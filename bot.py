@@ -150,7 +150,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/match [допуск%] [мин_цена] [макс_цена] [совпадение%] [ΔE] — лоты, где фон подходит модели по цвету, а цена как у обычной. совпадение% — сколько площади модели должно совпасть с фоном\n"
         "/matchstop — остановить поиск\n"
         "/matchtable [совпадение%] [ΔE] — подборка: какой фон какой модели подходит. Заданные пороги запоминаются, /match берёт их же. Запросов не делает\n"
-        "/premium [страниц] — замер: платит ли рынок за совпадение цвета фона с моделью. Одно число, по нему видно, есть ли смысл в /match\n"
+        "/premium [страниц] — замер: платит ли рынок за совпадение цвета фона с моделью. Проход по истории всех коллекций\n"
+        "/premium target — то же прицельно: спрашивает историю ровно по парам модель+фон. Быстрее и только так ловятся сильные совпадения\n"
         "/premiumstop — остановить замер\n"
         "/premiumbase — ответ по уже собранному, без запросов\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
@@ -1531,10 +1532,13 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         acc = next((a for a in accounts.values() if not a.paused), None) or \
             next(iter(accounts.values()))
+    words = {a.lower() for a in args}
+    args = [a for a in args if a.lower() != "target"]
+    aimed = "target" in words
     try:
         pages = max(1, min(40, int(args[0])))
     except (IndexError, ValueError):
-        pages = premium.HISTORY_PAGES
+        pages = premium.TARGET_PAGES if aimed else premium.HISTORY_PAGES
 
     await update.message.reply_text("Читаю базы…")
     base = await asyncio.to_thread(load_colors)
@@ -1556,10 +1560,24 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.run_coroutine_threadsafe(
             context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
 
+    settings = _match_settings(context)
+
     def work():
+        if aimed:
+            # Прицельно: случайной выборкой сильные совпадения не поймать —
+            # их 0.03% рынка. Спрашиваем историю ровно по нужным парам.
+            table = colors.matching_table(base, 1, settings["tol"], settings["coverage"])
+            levels = premium.backdrop_levels(known)
+            if not levels:
+                return {"error": "нет уровней фонов — сначала обычный /premium"}
+            say(f"Пар модель+фон к проверке: {len(table)}. "
+                f"Уровни известны для {len(levels)} фонов.")
+            return premium.targeted(
+                acc.client, acc, table, levels, pages=pages, on_progress=say,
+                should_stop=lambda: context.bot_data.get("premium_stop"))
         return premium.collect(
             acc.client, acc, names, base, pages=pages,
-            tol=_match_settings(context)["tol"], known=known,
+            tol=settings["tol"], known=known,
             on_progress=say, on_save=save_premium,
             should_stop=lambda: context.bot_data.get("premium_stop"))
 
@@ -1575,7 +1593,14 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result.get("error"):
         await update.message.reply_text(f"Не получилось: {result['error']}")
         return
-    await _send_premium(update, result, _match_settings(context))
+    if aimed:
+        await update.message.reply_text(menu.premium_target_text(result))
+        if result.get("rows"):
+            out = BytesIO(("\ufeff" + menu.premium_target_csv(result)).encode("utf-8"))
+            out.name = f"premium_target_{datetime.now():%Y-%m-%d_%H%M}.csv"
+            await update.message.reply_document(document=out, filename=out.name)
+        return
+    await _send_premium(update, result, settings)
 
 
 async def cmd_premiumstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
