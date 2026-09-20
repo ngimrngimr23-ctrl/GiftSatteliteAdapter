@@ -1369,16 +1369,18 @@ async def cmd_colorsprobe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Сорвалось: {e}")
         return
 
-    backdrop, model = got["backdrop_rgb"], got["model_rgb"]
+    backdrop = got["backdrop_rgb"]
+    palette = "\n".join(
+        f"   {p['share'] * 100:4.0f}%  RGB {p['rgb']} — {colors.color_name(p['rgb'])}"
+        for p in got["palette"])
     await update.message.reply_text(
         f"✅ {slug}\n"
         f"{got['how']}, {got['bytes'] // 1024} КБ\n"
         f"{got['url']}\n\n"
-        f"фон    RGB {backdrop} — {colors.color_name(backdrop)}\n"
-        f"модель RGB {model} — {colors.color_name(model)}\n"
-        f"расстояние между ними ΔE {colors.delta_e(backdrop, model):.0f}\n\n"
-        f"модель заняла {got['coverage'] * 100:.0f}% центра, "
-        f"на главный цвет пришлось {got['dominance'] * 100:.0f}% её пикселей\n\n"
+        f"фон  RGB {backdrop} — {colors.color_name(backdrop)}\n\n"
+        f"цвета модели:\n{palette}\n\n"
+        f"главный цвет против фона: ΔE {colors.delta_e(backdrop, got['model_rgb']):.0f}\n"
+        f"модель заняла {got['coverage'] * 100:.0f}% центра\n\n"
         "Сверь с картинкой ниже: если цвета названы верно — разбор работает.")
     picture = BytesIO(got["image"])
     picture.name = f"{slug}.jpg"

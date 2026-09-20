@@ -47,6 +47,8 @@ DIRECT_PATTERNS = (
 _OG_IMAGE = re.compile(rb'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
                        re.I)
 
+PALETTE_SIZE = 4   # сколько цветов модели запоминаем
+
 SHUTDOWN = threading.Event()
 
 
@@ -181,20 +183,32 @@ def extract_colors(data: bytes, size: int = 128) -> dict:
     if len(model_px) < total * 0.02:
         raise ColorError("модель не отделилась от фона — почти весь центр совпал с фоном")
 
-    # доминирующий цвет: огрубляем до 32 уровней на канал и берём самое
-    # населённое ведро. Среднее по всем пикселям дало бы грязно-серый — оно
-    # смешивает разные части рисунка.
+    # Палитра, а не один цвет. Модель почти всегда многоцветная: тело, белая
+    # обводка стикера, детали. Плюс в центр попадают значки узора фона — они
+    # другого оттенка, чем углы, и в один цвет не сворачиваются.
+    #
+    # Отделять узор от модели по оттенку я не стал: тогда модель, чей цвет
+    # совпадает с фоном, была бы выброшена целиком — а это ровно тот случай,
+    # ради которого всё и затевается. Вместо этого узор отсеивается сам, когда
+    # одну модель снимают с двух-трёх разных фонов: её цвета повторяются от
+    # снимка к снимку, цвета узора меняются вместе с фоном.
+    #
+    # Ведро — 16 уровней на канал, а не 32: тени и градиенты одного цвета
+    # иначе разъезжаются по соседним вёдрам и дробят долю.
     buckets = {}
     for pixel in model_px:
-        buckets.setdefault(tuple(v // 8 for v in pixel), []).append(pixel)
-    best = max(buckets.values(), key=len)
-    model = tuple(sorted(c[i] for c in best)[len(best) // 2] for i in range(3))
+        buckets.setdefault(tuple(v // 16 for v in pixel), []).append(pixel)
+    top = sorted(buckets.values(), key=len, reverse=True)[:PALETTE_SIZE]
+    palette = [{"rgb": tuple(sorted(c[i] for c in group)[len(group) // 2] for i in range(3)),
+                "share": len(group) / len(model_px)}
+               for group in top]
 
     return {
         "backdrop_rgb": backdrop,
-        "model_rgb": model,
+        "model_rgb": palette[0]["rgb"],
+        "palette": palette,
         "coverage": len(model_px) / total,
-        "dominance": len(best) / len(model_px),
+        "dominance": palette[0]["share"],
     }
 
 
