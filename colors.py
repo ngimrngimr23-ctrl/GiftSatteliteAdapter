@@ -47,7 +47,8 @@ DIRECT_PATTERNS = (
 _OG_IMAGE = re.compile(rb'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
                        re.I)
 
-PALETTE_SIZE = 4   # сколько цветов модели запоминаем
+PALETTE_SIZE = 4      # сколько цветов модели запоминаем
+MERGE_DELTA_E = 14.0  # ближе этого цвета считаем одним
 
 SHUTDOWN = threading.Event()
 
@@ -198,10 +199,27 @@ def extract_colors(data: bytes, size: int = 128) -> dict:
     buckets = {}
     for pixel in model_px:
         buckets.setdefault(tuple(v // 16 for v in pixel), []).append(pixel)
-    top = sorted(buckets.values(), key=len, reverse=True)[:PALETTE_SIZE]
-    palette = [{"rgb": tuple(sorted(c[i] for c in group)[len(group) // 2] for i in range(3)),
-                "share": len(group) / len(model_px)}
-               for group in top]
+
+    # Одних вёдер мало. На живой картинке чёрное тело Плюш Пепе разъехалось по
+    # трём вёдрам (8% + 8% + 5%) просто из-за теней и сжатия JPEG, и «главным»
+    # оказался кусок тела, а не тело. Поэтому вёдра, неотличимые на глаз,
+    # склеиваем: идём от самых населённых и подшиваем к ним всё, что ближе
+    # MERGE_DELTA_E. Граница в Lab, потому что только там одинаковая разница
+    # чисел означает одинаковую разницу на глаз.
+    clusters = []
+    for key, group in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+        colour = tuple(sorted(c[i] for c in group)[len(group) // 2] for i in range(3))
+        lab = rgb_to_lab(colour)
+        for cluster in clusters:
+            if math.sqrt(sum((a - b) ** 2 for a, b in zip(lab, cluster["lab"]))) < MERGE_DELTA_E:
+                cluster["n"] += len(group)
+                break
+        else:
+            clusters.append({"rgb": colour, "lab": lab, "n": len(group)})
+
+    clusters.sort(key=lambda c: -c["n"])
+    palette = [{"rgb": c["rgb"], "share": c["n"] / len(model_px)}
+               for c in clusters[:PALETTE_SIZE]]
 
     return {
         "backdrop_rgb": backdrop,
