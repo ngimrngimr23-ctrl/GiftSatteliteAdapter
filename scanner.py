@@ -796,7 +796,16 @@ class MatchParams:
     price_max: float = 0.0
     markets: tuple = WATCH_MARKETS
     top_backdrops: int = 3
-    max_delta: float = 25.0
+    tol: float = 15.0             # ближе этого цвет модели совпал с фоном
+    min_coverage: float = 0.5     # столько площади модели должно совпасть
+    # Сколько нужно обычных лотов, чтобы считать их уровнем цены. Минимум по
+    # одному лоту уровнем не является: в прошлом прогоне так вышла находка
+    # «дешевле на 67%» — у модели просто был ровно один другой лот, и он
+    # переоценён.
+    min_plain: int = 3
+    # Разброс среди обычных лотов меньше этого — значит все они стоят на флоре
+    # с точностью до копеек, и надбавку за фон там измерить нечем.
+    min_spread_pct: float = 3.0
     # До какого возраста верить цене по сделкам. Она тут запасной вариант: если
     # у модели нет ни одного лота на обычном фоне, сравнивать больше не с чем.
     ref_max_age_h: float = 72.0
@@ -816,7 +825,8 @@ def scan_matches(client, account, params: MatchParams, colors_base: dict,
     """
     import colors as colours
 
-    table = colours.matching_table(colors_base, params.top_backdrops, params.max_delta)
+    table = colours.matching_table(colors_base, params.top_backdrops,
+                                   params.tol, params.min_coverage)
     if not table:
         return {"error": "база цветов пуста или в ней нет фонов", "finds": []}
     names = sorted({collection for collection, _ in table})
@@ -826,10 +836,12 @@ def scan_matches(client, account, params: MatchParams, colors_base: dict,
         on_progress(f"🎯 Ищу подходящий фон без наценки.\n"
                     f"Моделей с подобранным фоном: {len(table)}, "
                     f"коллекций: {len(names)}.\n"
+                    f"Совпадение: не меньше {params.min_coverage * 100:.0f}% площади "
+                    f"модели при ΔE {params.tol:g}.\n"
                     f"Порог «без наценки»: не дороже обычного лота на "
                     f"{params.tolerance_pct:g}%.")
 
-    found, checked, no_base = [], 0, 0
+    found, checked, no_base, flat = [], 0, 0, 0
     for index, collection in enumerate(names, 1):
         if SHUTDOWN.is_set() or (should_stop and should_stop()):
             break
@@ -857,14 +869,20 @@ def scan_matches(client, account, params: MatchParams, colors_base: dict,
             if not info:
                 continue
             checked += 1
-            suits = {name.strip().lower(): delta for name, delta in info["backdrops"]}
+            suits = {name.strip().lower(): (share, delta)
+                     for name, share, delta in info["backdrops"]}
             fitting = [l for l in lots if l["backdrop"].strip().lower() in suits]
             if not fitting:
                 continue
-            plain = [l["price"] for l in lots
-                     if l["backdrop"].strip().lower() not in suits and l["price"] > 0]
-            if plain:
-                ordinary, source = min(plain), "по лотам той же модели"
+            plain = sorted(l["price"] for l in lots
+                           if l["backdrop"].strip().lower() not in suits and l["price"] > 0)
+            if len(plain) >= params.min_plain:
+                # медиана, а не минимум: минимум — это флор, и относительно
+                # него «без наценки» выходит у чего угодно
+                ordinary, source = statistics.median(plain), f"медиана {len(plain)} лотов"
+                if (plain[-1] - plain[0]) / plain[0] * 100 < params.min_spread_pct:
+                    flat += 1      # все лоты на флоре — надбавку мерить нечем
+                    continue
             else:
                 ref = (known_models.get(model) or {}).get("ref") if ref_fresh else None
                 if not ref:
@@ -881,9 +899,11 @@ def scan_matches(client, account, params: MatchParams, colors_base: dict,
                 if params.price_max and price > params.price_max:
                     continue
                 hit = dict(lot)
+                share, delta = suits[lot["backdrop"].strip().lower()]
                 hit.update({
                     "collection": collection,
-                    "delta": suits[lot["backdrop"].strip().lower()],
+                    "delta": delta,
+                    "coverage": share,
                     "ordinary": ordinary,
                     "source": source,
                     "premium": (price / ordinary - 1) * 100,
@@ -904,4 +924,5 @@ def scan_matches(client, account, params: MatchParams, colors_base: dict,
                         f"найдено {len(found)}")
 
     return {"finds": sorted(found, key=lambda h: h["premium"]),
-            "collections": len(names), "checked": checked, "no_base": no_base}
+            "collections": len(names), "checked": checked,
+            "no_base": no_base, "flat": flat}

@@ -146,9 +146,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/colors [снимков] [thin] [back] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма. thin — добрать модели, снятые с одного фона; back — пересобрать только фоны\n"
         "/colorsstop — остановить сбор\n"
         "/colorsbase — что накопила база цветов, файлом\n"
-        "/match [допуск%] [мин_цена] [макс_цена] — лоты, где фон подходит модели по цвету, а цена как у обычной: за сочетание не доплатили\n"
+        "/match [допуск%] [мин_цена] [макс_цена] [совпадение%] [ΔE] — лоты, где фон подходит модели по цвету, а цена как у обычной. совпадение% — сколько площади модели должно совпасть с фоном\n"
         "/matchstop — остановить поиск\n"
-        "/matchtable — сама подборка: какой фон какой модели подходит. Запросов не делает\n"
+        "/matchtable [совпадение%] [ΔE] — сама подборка: какой фон какой модели подходит и на сколько процентов площади. Запросов не делает\n"
         "/scanbase — что накопила база скана: коллекции, цены моделей, надбавки за фоны\n"
         "/scanpublish — выложить базу скана в GitHub (токены аккаунтов не отправляются)\n"
         "/forceupdate — пересчитать цены сейчас\n"
@@ -1538,6 +1538,8 @@ async def cmd_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tolerance_pct=number(0, 10.0),
         price_min=number(1, 0.0),
         price_max=number(2, 0.0),
+        min_coverage=number(3, colors.MATCH_MIN_COVERAGE * 100) / 100,
+        tol=number(4, colors.MATCH_TOL),
     )
     base = await asyncio.to_thread(load_colors)
     if not (base or {}).get("backdrops"):
@@ -1581,7 +1583,9 @@ async def cmd_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Коллекций: {result['collections']}, моделей с подобранным фоном "
         f"проверено: {result['checked']}\n"
         f"Найдено лотов без наценки за фон: {len(finds)}"
-        + (f"\nНе с чем было сравнить: {result['no_base']}" if result.get("no_base") else ""))
+        + (f"\nНе с чем было сравнить: {result['no_base']}" if result.get("no_base") else "")
+        + (f"\nПропущено, потому что все лоты стоят на флоре: {result['flat']}"
+           if result.get("flat") else ""))
     if finds:
         data = BytesIO(("\ufeff" + menu.match_report_csv(finds)).encode("utf-8"))
         data.name = f"match_{datetime.now():%Y-%m-%d_%H%M}.csv"
@@ -1603,17 +1607,31 @@ async def cmd_matchtable(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/matchtable — сама подборка: какой фон какой модели подходит. Запросов не делает."""
     if not authorized(update):
         return
+    args = list(context.args)
+
+    def number(index, default):
+        try:
+            return float(args[index].replace(",", "."))
+        except (IndexError, ValueError):
+            return default
+
+    min_coverage = number(0, colors.MATCH_MIN_COVERAGE * 100) / 100
+    tol = number(1, colors.MATCH_TOL)
     base = await asyncio.to_thread(load_colors)
-    table = await asyncio.to_thread(colors.matching_table, base)
+    table = await asyncio.to_thread(colors.matching_table, base,
+                                    colors.MATCH_TOP, tol, min_coverage)
     if not table:
         await update.message.reply_text(
-            "Подбирать не из чего: база цветов пуста. Сначала /colors")
+            "Ни одна модель не набрала такого совпадения. Попробуй мягче: "
+            "/matchtable 40 20")
         return
     total = sum(len(v) for v in (base.get("models") or {}).values() if isinstance(v, dict))
     await update.message.reply_text(
-        f"🎨 Подобрано фонов для {len(table)} моделей из {total}.\n"
-        f"У остальных ни один из {len(colors.backdrop_colors(base))} фонов не ближе "
-        f"ΔE {colors.MATCH_MAX_DELTA:g} — подбирать нечего.")
+        f"🎨 Совпадение не меньше {min_coverage * 100:.0f}% площади при ΔE {tol:g}, "
+        f"и главный цвет модели тоже должен попасть в этот порог.\n"
+        f"Подошло {len(table)} моделей из {total}.\n"
+        f"Фонов в базе: {len(colors.backdrop_colors(base))}.\n"
+        f"Мягче — /matchtable 40 20, строже — /matchtable 70 10.")
     data = BytesIO(("\ufeff" + menu.match_table_csv(table)).encode("utf-8"))
     data.name = f"matchtable_{datetime.now():%Y-%m-%d_%H%M}.csv"
     await update.message.reply_document(document=data, filename=data.name)

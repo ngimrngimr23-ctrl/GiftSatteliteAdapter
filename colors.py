@@ -585,7 +585,10 @@ def collect_backdrops(offers_for, collections: list, target: int = BACKDROP_TARG
 # --- подбор фона под модель -------------------------------------------------
 
 MIN_CHROMA = 15.0       # ниже этого цвет считается бесцветным: серый, белый, чёрный
-MATCH_MAX_DELTA = 25.0  # дальше этого фон модели уже не подходит
+MATCH_TOL = 15.0        # ближе этого цвет модели считается совпавшим с цветом фона
+# Половина площади модели. Ниже — рядом с фоном она уже не читается как одна
+# вещь. При ΔE 15 половину набирают 307 моделей из 4632, 60% — 152, 70% — 60.
+MATCH_MIN_COVERAGE = 0.5
 MATCH_TOP = 3           # сколько фонов оставляем на модель
 
 
@@ -625,21 +628,55 @@ def backdrop_colors(base: dict) -> dict:
     return out
 
 
-def best_backdrops(model_rgb, backdrops: dict, top: int = MATCH_TOP,
-                   max_delta: float = MATCH_MAX_DELTA) -> list:
-    """Ближайшие к модели фоны: [(имя, ΔE)], от самого близкого."""
-    near = sorted(((name, delta_e(model_rgb, rgb)) for name, rgb in backdrops.items()),
-                  key=lambda pair: pair[1])
-    return [pair for pair in near[:top] if pair[1] <= max_delta]
-
-
-def matching_table(base: dict, top: int = MATCH_TOP,
-                   max_delta: float = MATCH_MAX_DELTA) -> dict:
+def coverage(palette: list, backdrop_rgb, tol: float) -> float:
     """
-    (коллекция, модель) -> [(фон, ΔE)] — фоны, подходящие модели по цвету.
+    Какая доля модели по площади совпадает по цвету с этим фоном.
 
-    Модели, у которых нет ни одного фона ближе max_delta, в таблицу не
-    попадают: подбирать им нечего.
+    Одного ближайшего цвета мало. Модель, у которой красного 15%, а остальное
+    белая обводка и тёмный контур, на красном фоне красной не выглядит. А та,
+    что на 70% состоит из красного, сливается с ним в одну вещь — вот за это
+    сочетание и платят, если платят вообще. Считаем поэтому не расстояние до
+    главного цвета, а сумму долей всех цветов модели, попавших в порог.
+    """
+    return sum(p.get("share", 0) for p in palette
+               if delta_e(p["rgb"], backdrop_rgb) <= tol)
+
+
+def best_backdrops(palette: list, backdrops: dict, top: int = MATCH_TOP,
+                   tol: float = MATCH_TOL,
+                   min_coverage: float = MATCH_MIN_COVERAGE,
+                   require_key: bool = True) -> list:
+    """
+    Фоны, с которыми модель совпадает больше всего: [(имя, доля, ΔE)].
+
+    Одной доли площади мало. Тёмные и бесцветные фоны забирают заодно все тени
+    и контуры, которые есть у любой модели: у Loot Bag / Secret Toys с чёрным
+    «совпало» 90% площади, хотя сама модель красная. Поэтому требуем, чтобы
+    совпал и главный цвет модели, а не только её площадь — иначе больше
+    половины подборки уезжает на серое и чёрное.
+    """
+    main = key_color(palette)
+    out = []
+    for name, rgb in backdrops.items():
+        share = coverage(palette, rgb, tol)
+        if share < min_coverage:
+            continue
+        delta = delta_e(main["rgb"], rgb) if main else 0.0
+        if require_key and main and delta > tol:
+            continue
+        out.append((name, share, delta))
+    out.sort(key=lambda item: -item[1])
+    return out[:top]
+
+
+def matching_table(base: dict, top: int = MATCH_TOP, tol: float = MATCH_TOL,
+                   min_coverage: float = MATCH_MIN_COVERAGE,
+                   require_key: bool = True) -> dict:
+    """
+    (коллекция, модель) -> подходящие фоны.
+
+    Модели, у которых ни один фон не покрывает min_coverage площади, в таблицу
+    не попадают: подбирать им нечего.
     """
     backdrops = backdrop_colors(base)
     if not backdrops:
@@ -649,10 +686,12 @@ def matching_table(base: dict, top: int = MATCH_TOP,
         if not isinstance(models, dict):
             continue
         for model, info in models.items():
-            colour = key_color((info or {}).get("palette") or [])
+            palette = (info or {}).get("palette") or []
+            colour = key_color(palette)
             if not colour:
                 continue
-            near = best_backdrops(tuple(colour["rgb"]), backdrops, top, max_delta)
+            near = best_backdrops(palette, backdrops, top, tol,
+                                  min_coverage, require_key)
             if near:
                 out[(collection, model)] = {
                     "rgb": tuple(colour["rgb"]),

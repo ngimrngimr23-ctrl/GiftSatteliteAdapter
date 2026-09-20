@@ -1044,7 +1044,8 @@ def match_finds_text(collection: str, finds: list, limit: int = 8) -> str:
         thin = " ⚠️цвет по одному снимку" if f.get("samples", 0) < 2 else ""
         lines.append(
             f"• {f['model']} · {f['backdrop']} — {f['price']:.2f}\n"
-            f"   фон подходит модели, ΔE {f['delta']:.0f}{thin}\n"
+            f"   совпало {f.get('coverage', 0) * 100:.0f}% площади модели, "
+            f"ΔE главного цвета {f['delta']:.0f}{thin}\n"
             f"   обычный лот {f['ordinary']:.2f} ({f['source']}) — {mark}\n"
             f"   {f['market']}"
             + (f"\n   {offer_link(f)}" if offer_link(f) else ""))
@@ -1054,7 +1055,7 @@ def match_finds_text(collection: str, finds: list, limit: int = 8) -> str:
 
 
 def match_report_csv(finds: list) -> str:
-    rows = ["коллекция;модель;фон;ΔE;цена;обычный лот;наценка %;чем меряли;"
+    rows = ["коллекция;модель;фон;совпало %;ΔE;цена;обычный лот;наценка %;чем меряли;"
             "редкость %;маркет;снимков цвета;ссылка"]
 
     def num(value, digits=2):
@@ -1066,6 +1067,7 @@ def match_report_csv(finds: list) -> str:
             str(f.get("collection", "")).replace(";", ","),
             str(f.get("model", "")).replace(";", ","),
             str(f.get("backdrop", "")).replace(";", ","),
+            num(f.get("coverage", 0) * 100, 0),
             num(f.get("delta"), 1), num(f.get("price")), num(f.get("ordinary")),
             num(f.get("premium"), 1), str(f.get("source", "")),
             num(rarity / 10, 1) if rarity is not None else "",
@@ -1077,14 +1079,15 @@ def match_report_csv(finds: list) -> str:
 
 def match_table_csv(table: dict) -> str:
     """Сама подборка: какой фон какой модели подходит и насколько."""
-    rows = ["коллекция;модель;R;G;B;имя цвета;снимков;место;фон;ΔE"]
-    for (collection, model), info in sorted(table.items()):
+    rows = ["коллекция;модель;R;G;B;имя цвета;снимков;место;фон;совпало %;ΔE"]
+    for (collection, model), info in sorted(table.items(),
+                                            key=lambda kv: -kv[1]["backdrops"][0][1]):
         rgb = list(info["rgb"])
-        for place, (backdrop, delta) in enumerate(info["backdrops"], 1):
+        for place, (backdrop, share, delta) in enumerate(info["backdrops"], 1):
             rows.append(";".join([
                 str(collection).replace(";", ","), str(model).replace(";", ","),
                 *map(str, rgb), color_name_of(rgb), str(info.get("samples", "")),
                 str(place), str(backdrop).replace(";", ","),
-                f"{delta:.1f}".replace(".", ","),
+                f"{share * 100:.0f}", f"{delta:.1f}".replace(".", ","),
             ]))
     return "\n".join(rows)
