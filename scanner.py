@@ -653,26 +653,60 @@ def levels_from_store(data: dict) -> dict:
     return out
 
 
-def sales_low(sales: list, days: float, now: float) -> tuple:
+def sales_low(sales: list, days: float, now: float) -> dict:
     """
-    Самая дешёвая сделка за последние days дней и сколько их было.
+    Самая дешёвая сделка за последние days дней и всё, что нужно, чтобы понять
+    результат: сколько сделок попало в срок и почему остальные не попали.
 
     Площадки, чьи цены в расчёт не идут, выбрасываются тем же правилом, что и
     везде: на Telegram Market цены живут своей жизнью.
     """
     edge = now - days * 86400
-    prices = []
+    prices, ages, no_date, off_market = [], [], 0, 0
     for sale in sales or []:
         price = sale.get("normalizedPrice")
         if price is None or price <= 0:
             continue
         if (sale.get("market") or "").strip().lower() in PRICE_EXCLUDED_MARKETS:
+            off_market += 1
             continue
         when = parse_sold_at(sale.get("soldAt"))
-        if when is None or when < edge:
+        if when is None:
+            no_date += 1
             continue
-        prices.append(price)
-    return (min(prices) if prices else None), len(prices)
+        ages.append((now - when) / 86400)
+        if when >= edge:
+            prices.append(price)
+    return {
+        "low": min(prices) if prices else None,
+        "n": len(prices),
+        "total": len(sales or []),
+        "no_date": no_date,
+        "off_market": off_market,
+        "newest_days": min(ages) if ages else None,
+        "oldest_days": max(ages) if ages else None,
+    }
+
+
+def _low_why(info: dict, days: float) -> str:
+    """
+    Почему сверка по сделкам не состоялась — словами и с числами.
+
+    Без этого находка приходит без строки о минимуме и выглядит проверенной,
+    хотя проверки не было. А причин несколько, и лечатся они по-разному:
+    история вообще пустая, все сделки старше срока, или у сделок нет даты.
+    """
+    if not info["total"]:
+        return "история продаж пуста"
+    parts = [f"сделок за {days:g} дней всего {info['n']} из {info['total']}"]
+    if info["newest_days"] is not None:
+        parts.append(f"самая свежая {info['newest_days']:.0f} дн назад, "
+                     f"самая старая {info['oldest_days']:.0f} дн")
+    if info["no_date"]:
+        parts.append(f"без даты {info['no_date']}")
+    if info["off_market"]:
+        parts.append(f"вне учёта по маркету {info['off_market']}")
+    return "; ".join(parts)
 
 
 def watch_market(client, account, params: WatchParams, baseline=None,
@@ -757,15 +791,13 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                             # Сверка с историей: лот обязан быть дешевле любой
                             # сделки за last_days, иначе это не просадка, а
                             # возврат к обычной цене после пампа.
-                            sales = fetch_sales(collection, model)
-                            low, low_n = sales_low(sales, params.low_days, now)
+                            info = sales_low(fetch_sales(collection, model),
+                                             params.low_days, now)
+                            low, low_n = info["low"], info["n"]
                             if low_n < params.low_min_sales:
                                 # сверять не с чем — но молчать об этом нельзя,
                                 # иначе находка выглядит проверенной, а она нет
-                                low_why = (f"сделок за {params.low_days:g} дней "
-                                           f"всего {low_n}"
-                                           + (f" из {len(sales)} полученных"
-                                              if sales else ", история пуста"))
+                                low_why = _low_why(info, params.low_days)
                                 low = None
                             elif params.require_low and offer["price"] >= low:
                                 ok = False

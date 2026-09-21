@@ -979,8 +979,8 @@ def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
                if f.get("low_sale") else
                f"   ⚠️ по сделкам не проверено: {html_escape(f['low_why'])}\n"
                if f.get("low_why") else "")
-            + (f"   лотов по этой цене: {f['cheap_n']} из {f['lots_n']}\n"
-               if f.get("lots_n") else "")
+            + (f"   по этой цене {f['cheap_n']} лот(ов) из {f['lots_n']} "
+               f"видимых у модели\n" if f.get("lots_n") else "")
             + f"   {html_escape(f['market'])} · уровень {f['expected']:.2f} держался "
             f"{_spell_minutes(f.get('level_age_h', 0) * 60)} "
             f"по {f.get('samples', 0)} замерам"
