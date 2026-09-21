@@ -977,8 +977,15 @@ def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
             + (f"   минимум за {f['low_days']:.0f} дней по сделкам: было "
                f"{f['low_sale']:.2f} ({f['low_sales_n']} сделок)\n"
                if f.get("low_sale") else
-               f"   ⚠️ по сделкам не проверено: {html_escape(f['low_why'])}\n"
+               f"   ⚠️ за {f['low_days']:.0f} дней не проверено: "
+               f"{html_escape(f['low_why'])}\n"
                if f.get("low_why") else "")
+            + (f"   минимум за {f['low_days_short']:.0f} дня: было "
+               f"{f['low_short']:.2f} ({f['low_short_n']} сделок)\n"
+               if f.get("low_short") else
+               f"   ⚠️ за {f['low_days_short']:.0f} дня не проверено: "
+               f"{html_escape(f['low_short_why'])}\n"
+               if f.get("low_short_why") else "")
             + (f"   по этой цене {f['cheap_n']} лот(ов) из {f['lots_n']} "
                f"видимых у модели\n" if f.get("lots_n") else "")
             + f"   {html_escape(f['market'])} · уровень {f['expected']:.2f} держался "
@@ -1004,6 +1011,8 @@ def watch_pass_text(stats: dict) -> str:
         out += f", отсеяно как возврат к норме {stats['skipped_norm']}"
     if stats.get("not_low"):
         out += f", не минимум за период {stats['not_low']}"
+    if stats.get("deep"):
+        out += f", падение глубже потолка {stats['deep']}"
     return out
 
 
