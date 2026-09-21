@@ -502,19 +502,8 @@ class WatchParams:
     # успехом памп, вернувшийся к обычной цене. Настоящий многонедельный
     # минимум есть только в истории сделок, поэтому кандидат сверяется с ней.
     low_days: float = 14.0
-    # Второе окно, короткое. Длинное отвечает на вопрос «дешевле, чем когда-либо
-    # за две недели», короткое — «дешевле, чем на этих днях». Они ловят разное:
-    # модель могла плавно дешеветь неделю, и тогда двухнедельный минимум лот не
-    # пробьёт никогда, а трёхдневный покажет свежее движение.
-    low_days_short: float = 3.0
     require_low: bool = True        # не минимум за low_days — не показываем
-    require_low_short: bool = True  # то же для короткого окна
     low_min_sales: int = 4          # меньше сделок за срок — сверять не с чем
-    low_min_sales_short: int = 2    # за три дня сделок меньше по определению
-    # Потолок просадки. Падение на девяносто процентов — почти всегда не
-    # просадка, а сломанные данные или лот, который только выглядит тем же
-    # самым. 0 — потолка нет.
-    drop_max_pct: float = 60.0
     # Сколько последних замеров на дорожку сохранять между перезапусками.
     # Ровно столько, сколько нужно, чтобы после деплоя уровень был готов сразу,
     # а не через три круга. В памяти замеров держится больше — медиана по ним
@@ -749,11 +738,8 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             f"Ищу просадку флора от {params.drop_pct:g}% против уровня за "
             f"последние {params.memory_hours:g} ч.\n"
             f"И требую, чтобы лот был дешевле любой сделки за "
-            f"{params.low_days:g} и за {params.low_days_short:g} дней — иначе "
-            f"это не просадка, а возврат к обычной цене после пампа.\n"
-            + (f"Падение глубже {params.drop_max_pct:g}% пропускаю: это почти "
-               f"всегда сломанные данные, а не цена.\n"
-               if params.drop_max_pct else "")
+            f"{params.low_days:g} дней — иначе это не просадка, а возврат "
+            f"к обычной цене после пампа.\n"
             + (f"Замеров из прошлого запуска: {len(levels)} — прогрев не нужен.\n"
                if levels else
                f"Первые {params.min_samples} круга — прогрев: набираю уровни, "
@@ -765,7 +751,7 @@ def watch_market(client, account, params: WatchParams, baseline=None,
         passes += 1
         started = time.time()
         req0 = getattr(client, "total_requests", 0)
-        pass_finds = warming = skipped_norm = not_low = deep = 0
+        pass_finds = warming = skipped_norm = not_low = 0
 
         for collection in names:
             if SHUTDOWN.is_set() or (should_stop and should_stop()):
@@ -798,21 +784,15 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                     illiquid = per_month is not None and per_month < params.illiquid_per_month
                     if illiquid:
                         required *= params.illiquid_factor
-                    too_deep = (params.drop_max_pct
-                                and drop > params.drop_max_pct + 1e-9)
-                    if too_deep:
-                        deep += 1
-                    if (drop + 1e-9 >= required and not too_deep
-                            and _in_window(offer["price"], params)):
+                    if drop + 1e-9 >= required and _in_window(offer["price"], params):
                         ok, vs_ref = _sane_against_sales(offer, known, premiums, ref_fresh)
                         low, low_n, low_why = None, 0, "история не запрошена"
-                        short, short_n, short_why = None, 0, None
                         if ok and fetch_sales:
                             # Сверка с историей: лот обязан быть дешевле любой
                             # сделки за last_days, иначе это не просадка, а
                             # возврат к обычной цене после пампа.
-                            sales = fetch_sales(collection, model)
-                            info = sales_low(sales, params.low_days, now)
+                            info = sales_low(fetch_sales(collection, model),
+                                             params.low_days, now)
                             low, low_n = info["low"], info["n"]
                             if low_n < params.low_min_sales:
                                 # сверять не с чем — но молчать об этом нельзя,
@@ -822,16 +802,6 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                             elif params.require_low and offer["price"] >= low:
                                 ok = False
                                 not_low += 1
-                            if ok:
-                                brief = sales_low(sales, params.low_days_short, now)
-                                short, short_n = brief["low"], brief["n"]
-                                if short_n < params.low_min_sales_short:
-                                    short_why = _low_why(brief, params.low_days_short)
-                                    short = None
-                                elif (params.require_low_short
-                                      and offer["price"] >= short):
-                                    ok = False
-                                    not_low += 1
                         if not ok:
                             if low is None:
                                 skipped_norm += 1   # дороже цены по сделкам
@@ -867,10 +837,6 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                                 "low_days": params.low_days,
                                 "low_sales_n": low_n,
                                 "low_why": None if low else low_why,
-                                "low_short": short,
-                                "low_days_short": params.low_days_short,
-                                "low_short_n": short_n,
-                                "low_short_why": None if short else short_why,
                                 # сколько лотов стоит по этой же сниженной цене
                                 # и сколько всего у модели
                                 "cheap_n": sum(
@@ -917,7 +883,6 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             "warming": warming,
             "skipped_norm": skipped_norm,
             "not_low": not_low,
-            "deep": deep,
             "tracks": len(levels),
             "collections": len(names),
         }
