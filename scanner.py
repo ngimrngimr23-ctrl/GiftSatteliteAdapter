@@ -720,11 +720,18 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                                       if price > offer["price"] * 1.02]
                             last_high = max(higher) if higher else min(
                                 ts for ts, _ in history)
+                            # за какой срок эта цена — минимум: с последнего
+                            # замера, где было столько же или дешевле
+                            lower = [ts for ts, price in history
+                                     if price <= offer["price"]]
+                            min_since = max(lower) if lower else min(
+                                ts for ts, _ in history)
                             hit.update({
                                 "collection": collection,
                                 "expected": level,
                                 "benefit": drop,
                                 "within_min": (now - last_high) / 60,
+                                "min_span_min": (now - min_since) / 60,
                                 "required": required,
                                 "illiquid": illiquid,
                                 "per_month": per_month,

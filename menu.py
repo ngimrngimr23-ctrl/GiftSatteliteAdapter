@@ -974,7 +974,9 @@ def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
             f"• <code>{html_escape(f['model'])}</code>{backdrop}{tag}\n"
             f"   <b>{f['expected']:.2f} → {f['price']:.2f} {span}</b> "
             f"(−{f['benefit']:.0f}%)\n"
-            f"   {html_escape(f['market'])} · уровень {f['expected']:.2f} держался "
+            + (f"   минимум за {_spell_minutes(f['min_span_min'])}\n"
+               if f.get("min_span_min") else "")
+            + f"   {html_escape(f['market'])} · уровень {f['expected']:.2f} держался "
             f"{_spell_minutes(f.get('level_age_h', 0) * 60)} "
             f"по {f.get('samples', 0)} замерам"
             + (f"\n   дешевле цены по сделкам на {vs_ref:.0f}%" if vs_ref is not None else "")
