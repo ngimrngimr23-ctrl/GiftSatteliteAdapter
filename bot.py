@@ -141,7 +141,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "цены модели; fast — быстрый проход по дешёвому краю, missing — только коллекции, "
         "которых ещё нет в базе\n"
         "/scanstop — прервать идущий скан\n"
-        "/watch [просадка%] [мин_цена] [макс_цена] [all] — дозор: гоняет по кругу одни листинги и ловит модели, чей флор только что ушёл вниз против своего же уровня. Круг — минуты, историю продаж не качает\n"
+        "/watch [просадка%] [мин_цена] [макс_цена] [дней] [all] — дозор: гоняет по кругу листинги и ловит модели, чей флор только что ушёл вниз. Находка обязана быть минимумом по реальным сделкам за [дней] — иначе это не просадка, а возврат после пампа\n"
         "/watchstop — остановить дозор\n"
         "/colorsprobe <slug> — проверка на одной вещи: скачать её картинку и вынуть цвет фона и цвет модели\n"
         "/colors [снимков] [thin] [back] — собрать цвета всех моделей и фонов. К API — по три запроса на коллекцию, картинки идут с телеграма. thin — добрать модели, снятые с одного фона; back — пересобрать только фоны\n"
@@ -1297,6 +1297,8 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         drop_pct=number(0, 20.0),
         price_min=number(1, 0.0),
         price_max=number(2, 0.0),
+        # за сколько дней лот обязан быть минимумом по реальным сделкам
+        low_days=number(3, scanner.WatchParams.low_days),
         # по умолчанию три основных маркета: круг тем быстрее, чем меньше
         # запросов, а tg и getgems дают считанные листинги
         markets=scanner.ALL_MARKETS if "all" in words else scanner.WATCH_MARKETS,
@@ -1339,6 +1341,10 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # перезапуска три круга молчит, набирая уровень заново
             on_levels=save_watch_levels,
             levels_seed=seed,
+            # история сделок для сверки «минимум за N дней»; идёт через тот же
+            # кеш, что и отбор моделей, поэтому повторы почти бесплатны
+            fetch_sales=lambda collection, model: fetch_sales_for(
+                acc.client, collection, model, acc.sales_depth, acc),
         )
 
     try:

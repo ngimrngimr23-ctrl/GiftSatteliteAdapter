@@ -974,8 +974,9 @@ def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
             f"• <code>{html_escape(f['model'])}</code>{backdrop}{tag}\n"
             f"   <b>{f['expected']:.2f} → {f['price']:.2f} {span}</b> "
             f"(−{f['benefit']:.0f}%)\n"
-            + (f"   минимум за {_spell_minutes(f['min_span_min'])}\n"
-               if f.get("min_span_min") else "")
+            + (f"   минимум за {f['low_days']:.0f} дней по сделкам: было "
+               f"{f['low_sale']:.2f} ({f['low_sales_n']} сделок)\n"
+               if f.get("low_sale") else "")
             + f"   {html_escape(f['market'])} · уровень {f['expected']:.2f} держался "
             f"{_spell_minutes(f.get('level_age_h', 0) * 60)} "
             f"по {f.get('samples', 0)} замерам"
@@ -997,6 +998,8 @@ def watch_pass_text(stats: dict) -> str:
         out += f", прогревается {stats['warming']} моделей"
     if stats.get("skipped_norm"):
         out += f", отсеяно как возврат к норме {stats['skipped_norm']}"
+    if stats.get("not_low"):
+        out += f", не минимум за период {stats['not_low']}"
     return out
 
 

@@ -20,7 +20,8 @@ import time
 from dataclasses import dataclass, field
 
 from api_client import ApiError
-from model_picker import percentile, sales_stats
+from model_picker import (PRICE_EXCLUDED_MARKETS, parse_sold_at,
+                          percentile, sales_stats)
 
 log = logging.getLogger("scanner")
 
@@ -496,6 +497,13 @@ class WatchParams:
     illiquid_per_month: float = 4.0
     illiquid_factor: float = 1.3
     pause_seconds: float = 0.0      # пауза между кругами
+    # За сколько дней находка обязана быть минимумом. Своей памяти у дозора
+    # хватает на часы, а минимум за три часа ничего не значит: это с тем же
+    # успехом памп, вернувшийся к обычной цене. Настоящий многонедельный
+    # минимум есть только в истории сделок, поэтому кандидат сверяется с ней.
+    low_days: float = 14.0
+    require_low: bool = True        # не минимум за low_days — не показываем
+    low_min_sales: int = 4          # меньше сделок за срок — сверять не с чем
     # Сколько последних замеров на дорожку сохранять между перезапусками.
     # Ровно столько, сколько нужно, чтобы после деплоя уровень был готов сразу,
     # а не через три круга. В памяти замеров держится больше — медиана по ним
@@ -635,10 +643,32 @@ def levels_from_store(data: dict) -> dict:
     return out
 
 
+def sales_low(sales: list, days: float, now: float) -> tuple:
+    """
+    Самая дешёвая сделка за последние days дней и сколько их было.
+
+    Площадки, чьи цены в расчёт не идут, выбрасываются тем же правилом, что и
+    везде: на Telegram Market цены живут своей жизнью.
+    """
+    edge = now - days * 86400
+    prices = []
+    for sale in sales or []:
+        price = sale.get("normalizedPrice")
+        if price is None or price <= 0:
+            continue
+        if (sale.get("market") or "").strip().lower() in PRICE_EXCLUDED_MARKETS:
+            continue
+        when = parse_sold_at(sale.get("soldAt"))
+        if when is None or when < edge:
+            continue
+        prices.append(price)
+    return (min(prices) if prices else None), len(prices)
+
+
 def watch_market(client, account, params: WatchParams, baseline=None,
                  on_finds=None, on_progress=None, should_stop=None,
                  on_pass=None, on_levels=None, levels_seed=None,
-                 max_passes: int = 0) -> dict:
+                 fetch_sales=None, max_passes: int = 0) -> dict:
     """
     Бесконечный круг по листингам. Находка — модель, чей флор ушёл ниже своего
     же уровня за последние часы.
@@ -663,6 +693,9 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             f"Коллекций в обходе: {len(names)}, маркетов {len(params.markets)}.\n"
             f"Ищу просадку флора от {params.drop_pct:g}% против уровня за "
             f"последние {params.memory_hours:g} ч.\n"
+            f"И требую, чтобы лот был дешевле любой сделки за "
+            f"{params.low_days:g} дней — иначе это не просадка, а возврат "
+            f"к обычной цене после пампа.\n"
             + (f"Замеров из прошлого запуска: {len(levels)} — прогрев не нужен.\n"
                if levels else
                f"Первые {params.min_samples} круга — прогрев: набираю уровни, "
@@ -674,7 +707,7 @@ def watch_market(client, account, params: WatchParams, baseline=None,
         passes += 1
         started = time.time()
         req0 = getattr(client, "total_requests", 0)
-        pass_finds = warming = skipped_norm = 0
+        pass_finds = warming = skipped_norm = not_low = 0
 
         for collection in names:
             if SHUTDOWN.is_set() or (should_stop and should_stop()):
@@ -708,8 +741,21 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                         required *= params.illiquid_factor
                     if drop + 1e-9 >= required and _in_window(offer["price"], params):
                         ok, vs_ref = _sane_against_sales(offer, known, premiums, ref_fresh)
+                        low, low_n = None, 0
+                        if ok and fetch_sales:
+                            # Сверка с историей: лот обязан быть дешевле любой
+                            # сделки за last_days, иначе это не просадка, а
+                            # возврат к обычной цене после пампа.
+                            low, low_n = sales_low(
+                                fetch_sales(collection, model), params.low_days, now)
+                            if low_n < params.low_min_sales:
+                                low = None      # сверять не с чем
+                            elif params.require_low and offer["price"] >= low:
+                                ok = False
+                                not_low += 1
                         if not ok:
-                            skipped_norm += 1
+                            if low is None:
+                                skipped_norm += 1   # дороже цены по сделкам
                         else:
                             hit = dict(offer)
                             age_h = (now - min(ts for ts, _ in history)) / 3600
@@ -738,6 +784,9 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                                 "model_ref": known.get("ref"),
                                 "rarity": known.get("rarity"),
                                 "vs_ref": vs_ref,
+                                "low_sale": low,
+                                "low_days": params.low_days,
+                                "low_sales_n": low_n,
                                 "samples": len(history),
                                 "level_age_h": age_h,
                                 "rule": (f"флор был {level:.2f} — {len(history)} "
@@ -777,6 +826,7 @@ def watch_market(client, account, params: WatchParams, baseline=None,
             "finds": pass_finds,
             "warming": warming,
             "skipped_norm": skipped_norm,
+            "not_low": not_low,
             "tracks": len(levels),
             "collections": len(names),
         }
