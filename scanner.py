@@ -547,6 +547,16 @@ def _watch_offers(client, account, collection: str, params: WatchParams) -> list
     return offers
 
 
+def _by_track(offers: list) -> dict:
+    """Все оферы по каждой паре «модель + чёрный/не чёрный»."""
+    out = {}
+    for offer in offers:
+        if offer["price"] <= 0:
+            continue
+        out.setdefault((offer["model"], is_black(offer["backdrop"])), []).append(offer)
+    return out
+
+
 def _floor_by_track(offers: list) -> dict:
     """
     Самый дешёвый офер по каждой паре «модель + чёрный/не чёрный».
@@ -722,6 +732,7 @@ def watch_market(client, account, params: WatchParams, baseline=None,
 
             now = time.time()
             finds = []
+            tracks = _by_track(offers)
             for (model, black), offer in _floor_by_track(offers).items():
                 key = (collection, model, black)
                 history = [(ts, price) for ts, price in levels.get(key, ())
@@ -741,15 +752,21 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                         required *= params.illiquid_factor
                     if drop + 1e-9 >= required and _in_window(offer["price"], params):
                         ok, vs_ref = _sane_against_sales(offer, known, premiums, ref_fresh)
-                        low, low_n = None, 0
+                        low, low_n, low_why = None, 0, "история не запрошена"
                         if ok and fetch_sales:
                             # Сверка с историей: лот обязан быть дешевле любой
                             # сделки за last_days, иначе это не просадка, а
                             # возврат к обычной цене после пампа.
-                            low, low_n = sales_low(
-                                fetch_sales(collection, model), params.low_days, now)
+                            sales = fetch_sales(collection, model)
+                            low, low_n = sales_low(sales, params.low_days, now)
                             if low_n < params.low_min_sales:
-                                low = None      # сверять не с чем
+                                # сверять не с чем — но молчать об этом нельзя,
+                                # иначе находка выглядит проверенной, а она нет
+                                low_why = (f"сделок за {params.low_days:g} дней "
+                                           f"всего {low_n}"
+                                           + (f" из {len(sales)} полученных"
+                                              if sales else ", история пуста"))
+                                low = None
                             elif params.require_low and offer["price"] >= low:
                                 ok = False
                                 not_low += 1
@@ -787,6 +804,13 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                                 "low_sale": low,
                                 "low_days": params.low_days,
                                 "low_sales_n": low_n,
+                                "low_why": None if low else low_why,
+                                # сколько лотов стоит по этой же сниженной цене
+                                # и сколько всего у модели
+                                "cheap_n": sum(
+                                    1 for o in tracks.get((model, black), ())
+                                    if o["price"] <= offer["price"] * 1.02),
+                                "lots_n": len(tracks.get((model, black), ())),
                                 "samples": len(history),
                                 "level_age_h": age_h,
                                 "rule": (f"флор был {level:.2f} — {len(history)} "
