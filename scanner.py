@@ -713,10 +713,18 @@ def watch_market(client, account, params: WatchParams, baseline=None,
                         else:
                             hit = dict(offer)
                             age_h = (now - min(ts for ts, _ in history)) / 3600
+                            # когда флор в последний раз был ещё на старом
+                            # уровне: между тем замером и сейчас просадка и
+                            # случилась, и это самое важное в находке
+                            higher = [ts for ts, price in history
+                                      if price > offer["price"] * 1.02]
+                            last_high = max(higher) if higher else min(
+                                ts for ts, _ in history)
                             hit.update({
                                 "collection": collection,
                                 "expected": level,
                                 "benefit": drop,
+                                "within_min": (now - last_high) / 60,
                                 "required": required,
                                 "illiquid": illiquid,
                                 "per_month": per_month,

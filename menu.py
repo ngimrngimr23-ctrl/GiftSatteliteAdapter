@@ -938,21 +938,47 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.warning("неизвестное действие меню: %s", query.data)
 
 
+def html_escape(text: str) -> str:
+    """Экранирование для parse_mode=HTML. Кроме этих трёх телеграму ничего не мешает."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _spell_minutes(minutes: float) -> str:
+    """Сколько времени прошло, словами."""
+    if minutes < 1:
+        return "меньше минуты"
+    if minutes < 90:
+        return f"{minutes:.0f} мин"
+    if minutes < 48 * 60:
+        return f"{minutes / 60:.1f} ч"
+    return f"{minutes / 1440:.0f} дн"
+
+
 def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
-    """Просадки, найденные дозором. Уходят в чат сразу, круг не дожидается."""
-    lines = [f"⚡ {collection} — просадок {len(finds)}"]
+    """
+    Просадки, найденные дозором. Уходит в чат в разметке HTML.
+
+    Имя подарка и модели обёрнуты в <code>: в телеграме такой текст копируется
+    одним нажатием, а его как раз и надо переносить в заказ.
+    """
+    lines = [f"⚡ <code>{html_escape(collection)}</code> — просадок {len(finds)}"]
     for f in finds[:limit]:
         tag = " ⚠️неликвид" if f.get("illiquid") else ""
-        backdrop = f" · {f['backdrop']}" if f.get("backdrop") else ""
+        backdrop = f" · {html_escape(f['backdrop'])}" if f.get("backdrop") else ""
         vs_ref = f.get("vs_ref")
+        within = f.get("within_min")
         lines.append(
-            f"• {f['model']}{backdrop} — {f['price']:.2f}, было {f['expected']:.2f} "
-            f"(−{f['benefit']:.0f}%){tag}\n"
-            f"   {f['market']} · {f['rule']}"
+            f"• <code>{html_escape(f['model'])}</code>{backdrop} — "
+            f"{f['price']:.2f}, было {f['expected']:.2f} (−{f['benefit']:.0f}%){tag}\n"
+            + (("   просела только что\n" if within < 1 else
+                f"   просела за последние {_spell_minutes(within)}\n")
+               if within is not None else "")
+            + f"   {html_escape(f['market'])} · уровень держался "
+              f"{_spell_minutes(f.get('level_age_h', 0) * 60)} "
+              f"по {f.get('samples', 0)} замерам"
             + (f"\n   дешевле цены по сделкам на {vs_ref:.0f}%" if vs_ref is not None else "")
             + (f" · сделок/мес {f['per_month']:.0f}" if f.get("per_month") else "")
-            + (f"\n   {offer_link(f)}" if offer_link(f) else "")
-        )
+            + (f"\n   {html_escape(offer_link(f))}" if offer_link(f) else ""))
     if len(finds) > limit:
         lines.append(f"…и ещё {len(finds) - limit}")
     return "\n".join(lines)

@@ -1310,9 +1310,12 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["watch_running"] = True
     context.bot_data["watch_stop"] = False
 
-    def say(text: str):
+    def say(text: str, html: bool = False):
+        # находки уходят разметкой: имя подарка и модели в <code>, чтобы
+        # копировались одним нажатием — их же переносить в заказ
         asyncio.run_coroutine_threadsafe(
-            context.bot.send_message(chat_id=chat_id, text=text[:4000]), loop)
+            context.bot.send_message(chat_id=chat_id, text=text[:4000],
+                                     parse_mode="HTML" if html else None), loop)
 
     baseline = await asyncio.to_thread(load_scan_baseline)
     seed = await asyncio.to_thread(load_watch_levels)
@@ -1328,7 +1331,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return scanner.watch_market(
             acc.client, acc, params, baseline=baseline,
             on_finds=lambda collection, finds: say(
-                menu.watch_finds_text(collection, finds)),
+                menu.watch_finds_text(collection, finds), html=True),
             on_progress=say,
             on_pass=lambda stats: say(menu.watch_pass_text(stats)),
             should_stop=lambda: context.bot_data.get("watch_stop"),
