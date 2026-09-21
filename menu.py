@@ -958,8 +958,9 @@ def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
     """
     Просадки, найденные дозором. Уходит в чат в разметке HTML.
 
-    Имя подарка и модели обёрнуты в <code>: в телеграме такой текст копируется
-    одним нажатием, а его как раз и надо переносить в заказ.
+    Главное — одной строкой: с какой цены, на какую и за сколько времени. Всё
+    остальное ниже и мельче. Имя подарка и модели обёрнуты в <code>: в
+    телеграме такой текст копируется одним нажатием, а его и переносить в заказ.
     """
     lines = [f"⚡ <code>{html_escape(collection)}</code> — просадок {len(finds)}"]
     for f in finds[:limit]:
@@ -967,15 +968,15 @@ def watch_finds_text(collection: str, finds: list, limit: int = 8) -> str:
         backdrop = f" · {html_escape(f['backdrop'])}" if f.get("backdrop") else ""
         vs_ref = f.get("vs_ref")
         within = f.get("within_min")
+        span = ("только что" if within is not None and within < 1
+                else f"за {_spell_minutes(within)}" if within is not None else "")
         lines.append(
-            f"• <code>{html_escape(f['model'])}</code>{backdrop} — "
-            f"{f['price']:.2f}, было {f['expected']:.2f} (−{f['benefit']:.0f}%){tag}\n"
-            + (("   просела только что\n" if within < 1 else
-                f"   просела за последние {_spell_minutes(within)}\n")
-               if within is not None else "")
-            + f"   {html_escape(f['market'])} · уровень держался "
-              f"{_spell_minutes(f.get('level_age_h', 0) * 60)} "
-              f"по {f.get('samples', 0)} замерам"
+            f"• <code>{html_escape(f['model'])}</code>{backdrop}{tag}\n"
+            f"   <b>{f['expected']:.2f} → {f['price']:.2f} {span}</b> "
+            f"(−{f['benefit']:.0f}%)\n"
+            f"   {html_escape(f['market'])} · уровень {f['expected']:.2f} держался "
+            f"{_spell_minutes(f.get('level_age_h', 0) * 60)} "
+            f"по {f.get('samples', 0)} замерам"
             + (f"\n   дешевле цены по сделкам на {vs_ref:.0f}%" if vs_ref is not None else "")
             + (f" · сделок/мес {f['per_month']:.0f}" if f.get("per_month") else "")
             + (f"\n   {html_escape(offer_link(f))}" if offer_link(f) else ""))
